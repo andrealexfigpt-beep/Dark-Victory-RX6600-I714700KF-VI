@@ -3,12 +3,17 @@
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Build        target\diag (the default, the build all measurements are of) or target\release
+# -Fullscreen   request DXGI fullscreen (default is windowed)
+# -WarmShaders  warm up to 128 previously used pipelines before running
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$Safe,
     [switch]$RayTracing,
+    [ValidateSet('series-s', 'series-x')][string]$ConsoleProfile = 'series-s',
+    [switch]$Fullscreen,
+    [switch]$WarmShaders,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
@@ -19,10 +24,13 @@ $settings = @{
     VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
 }
 if ($Safe) {
-    $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
+    $settings.VICTORY_UNDER_WIDE = '0'
+    $settings.VICTORY_LAND_ECHO = '0'
 } else {
-    $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
+    $settings.VICTORY_JOIN_PARTS = '4'
+    $settings.VICTORY_TEXTURE_STAGE_MS = '16'
 }
+if ($Fullscreen) { $settings.VICTORY_FULLSCREEN = '1' }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
@@ -35,4 +43,12 @@ Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-O
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 $Exe = (Resolve-Path $Exe).Path
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
-try { & $victory run $Exe --execute } finally { Pop-Location }
+try {
+    if ($WarmShaders) {
+        & $victory warm --used --jobs 2 --limit 128
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    & $victory run $Exe --execute --console $ConsoleProfile
+} finally {
+    Pop-Location
+}

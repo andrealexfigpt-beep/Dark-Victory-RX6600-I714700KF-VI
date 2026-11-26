@@ -2110,7 +2110,7 @@ pub(crate) fn pass_timing_line(frames: f64) {
         return;
     }
     let mut rows: Vec<_> = times.into_iter().collect();
-    rows.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
+    rows.sort_by_key(|row| std::cmp::Reverse((row.1).1));
     let text = rows
         .iter()
         .map(|(what, (n, us, max))| {
@@ -3001,6 +3001,7 @@ struct Flight {
 }
 
 /// One thing in the line of what waits for the card, in order.
+#[allow(clippy::large_enum_variant)] // Keep flights inline in the hot submission queue.
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.
@@ -3234,7 +3235,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -4025,6 +4026,7 @@ fn late_line(frames: f64) {
 pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
@@ -4877,8 +4879,8 @@ impl Host {
         let Some(work) = work.as_mut() else {
             return;
         };
+        #[cfg(feature = "diagnostics")]
         for (check, list) in &plan.lists {
-            #[cfg(feature = "diagnostics")]
             pass_read(&list.1, if *check { "card-compare" } else { "card-copy/hash" });
         }
         for (check, list) in plan.lists {
@@ -8014,6 +8016,7 @@ enum Touch {
     /// The copy is given to shaders.
     Write(usize),
     /// Title memory is written.
+    #[cfg(test)]
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -8040,6 +8043,7 @@ fn written_spans(steps: impl Iterator<Item = Touch>) -> Vec<(usize, usize, usize
                     span.2 = true;
                 }
             }
+            #[cfg(test)]
             Touch::Title => break,
             Touch::Nothing => {}
             #[cfg(test)]

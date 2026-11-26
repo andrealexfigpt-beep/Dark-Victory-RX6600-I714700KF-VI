@@ -488,6 +488,7 @@ impl Player {
 
     /// The commands that copy the texels of `spots` to [`PROBE`] from `first`
     /// on; `copied`: a copy to them went before.
+    #[allow(clippy::too_many_arguments)] // Capture bounds and output are supplied by the replay.
     fn take(
         &self,
         spots: &[Spot],

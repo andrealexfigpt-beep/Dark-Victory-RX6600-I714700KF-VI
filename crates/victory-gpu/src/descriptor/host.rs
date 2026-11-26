@@ -990,6 +990,16 @@ impl TextureQueue {
         }
     }
 
+    /// Retry after upload memory runs short without counting a failed
+    /// allocation as missing title pages or resetting existing mip progress.
+    fn defer_uploads(&mut self, entries: &[(u32, u64)], retry_at: u64) {
+        for &(index, write) in entries {
+            if let Some(waiting) = self.same(index, write) {
+                waiting.due = waiting.due.max(retry_at);
+            }
+        }
+    }
+
     /// The card has no room for the host copy slot `index` needs: it is
     /// not handed out again before frame `due`, or before the card has
     /// room again ([`TextureQueue::room`]). Nothing else of it changes: it
@@ -1823,6 +1833,13 @@ impl HostHeap {
     pub(crate) fn texture_slot_later(&self, index: u32, write: u64, frame: u64, most: u64) {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         textures.later(index, write, frame, most);
+    }
+
+    /// Return deferred staging requests to the queue under a single lock.
+    pub(crate) fn texture_slots_retry_uploads(&self, entries: &[(u32, u64)], retry_at: u64) {
+        if !entries.is_empty() {
+            self.textures.lock().unwrap_or_else(|e| e.into_inner()).defer_uploads(entries, retry_at);
+        }
     }
 
     /// See [`TextureQueue::hold`].
@@ -5186,6 +5203,19 @@ mod tests {
         for i in 9..=16 { q.written(i, 0, 0, false); }
         let chosen: Vec<_> = q.due(1, 4).iter().map(|s| s.0).collect();
         assert_eq!(chosen, [8, 16, 7, 9]);
+    }
+
+    #[test]
+    fn upload_deferral_preserves_partial_progress_and_new_writes() {
+        let mut queue = TextureQueue::default();
+        queue.written(1, 1, 1, false);
+        queue.written(2, 1, 1, false);
+        queue.partly(1, 1, 1, 4096);
+        queue.written(2, 1, 1, false);
+        queue.defer_uploads(&[(1, 1), (2, 2)], 3);
+        assert_eq!(queue.due(1, 2), [(2, 3)]);
+        assert_eq!(queue.mapped(1), 4096);
+        assert_eq!(queue.due(3, 2), [(1, 1), (2, 3)]);
     }
 
     /// Slots held back for lack of room on the card are not handed out

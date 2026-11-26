@@ -1518,7 +1518,7 @@ impl State {
                 } else {
                     crate::memory::Use::Reads
                 };
-                let Some(ready) = self.memory_ready(list, &t, compute, use_) else {
+                let Some(ready) = self.memory_ready(list, t, compute, use_) else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
                     return false;
                 };
@@ -2237,6 +2237,10 @@ impl State {
         };
         let began = std::time::Instant::now();
         BAKE_SERVED.store(0, Ordering::Relaxed);
+        // A large texture can need a new staging block while smaller ones
+        // still fit existing blocks. Limit the extra search on a full pool.
+        const MAX_DEFERRED_UPLOADS: usize = 64;
+        let mut deferred_uploads = Vec::new();
         let mut served = true;
         for (index, write) in due {
             if SPENT.load(Ordering::Relaxed) >= bytes_at_most || began.elapsed() > span {
@@ -2463,8 +2467,12 @@ impl State {
                 None
             };
             if crate::texture::STAGING_DEFERRED.replace(false) {
+                deferred_uploads.push((index, write));
                 served = false;
-                break;
+                if baking || deferred_uploads.len() >= MAX_DEFERRED_UPLOADS {
+                    break;
+                }
+                continue;
             }
             if let Some(ahead) = &ahead {
                 use crate::texture::ahead::Taken;
@@ -2487,8 +2495,12 @@ impl State {
                 crate::texture::PICKING.set(None);
             }
             if crate::texture::STAGING_DEFERRED.replace(false) {
+                deferred_uploads.push((index, write));
                 served = false;
-                break;
+                if baking || deferred_uploads.len() >= MAX_DEFERRED_UPLOADS {
+                    break;
+                }
+                continue;
             }
             if shows_other && let Some(handle) = heap.handle(index) {
                 host.texture_slot_flip(list, index, handle);
@@ -2573,6 +2585,7 @@ impl State {
                 None => host.texture_slot_done(index, write, again),
             }
         }
+        host.texture_slots_retry_uploads(&deferred_uploads, frame.saturating_add(2));
         if baking && served {
             BAKE_SERVED.store(host.texture_news().0 + 1, Ordering::Relaxed);
         }
@@ -3077,7 +3090,7 @@ impl State {
             let draws: u32 = census.1.values().sum();
             if draws > 0 {
                 let mut rects: Vec<([i32; 4], u32)> = census.1.iter().map(|(r, n)| (*r, *n)).collect();
-                rects.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                rects.sort_unstable_by_key(|r| std::cmp::Reverse(r.1));
                 let scissors: Vec<String> = rects
                     .iter()
                     .take(5)
@@ -3156,7 +3169,7 @@ impl State {
     /// once: its constant data is copied at submission either way, and the
     /// big tables the world binds would otherwise take hundreds of slots per
     /// draw, wrapping the dynamic slots onto lists not yet submitted.
-    pub(crate) fn tables(
+    fn tables(
         &mut self,
         list: &HostList,
         used: &[UsedResource],

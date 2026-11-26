@@ -594,6 +594,7 @@ pub(crate) unsafe fn piece(
 ///
 /// # Safety
 /// [`piece`]'s.
+#[allow(clippy::too_many_arguments)] // The raw piece and its bounds are passed separately.
 unsafe fn piece_at(
     title: usize,
     now: *const u8,
