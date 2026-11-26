@@ -3223,7 +3223,7 @@ fn refused(why: &'static str) {
 
 /// The wait that comes next is for these ranges ([`stale_under_flights`]).
 #[cfg(feature = "diagnostics")]
-fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) {
+fn blame_stale(stale: &[StaleSpan<'_>]) {
     if let Some((shadow, from, _)) = stale.first() {
         let (start, len) = shadow.span();
         let key = ("title memory changed under shader writes", crate::shadow::stale_why(), 0, start as usize, len as usize);
@@ -3370,20 +3370,26 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
 }
 
 type RefreshSpan = (std::sync::Arc<crate::shadow::Shadow>, usize, usize);
+type StaleSpan<'a> = (&'a crate::shadow::Shadow, usize, usize);
 
 /// Immutable list metadata shared by the submission's write-watch query and
 /// any retries after a landing. GPU ownership and page state are checked anew.
 fn refresh_spans(runs: &[&HostList]) -> Vec<RefreshSpan> {
-    use std::sync::Arc;
     let mut slots: ByCopy<usize> = ByCopy::default();
     let mut spans: Vec<RefreshSpan> = Vec::new();
+    let mut previous = None;
     for list in runs {
         for step in &list.deferred().copies {
             if let Step::Refresh(shadow, at, len) = step {
-                let i = *slots.entry(Arc::as_ptr(shadow) as usize).or_insert_with(|| {
-                    spans.push((shadow.clone(), *at, *at + *len));
-                    spans.len() - 1
-                });
+                let key = std::sync::Arc::as_ptr(shadow) as usize;
+                let i = match previous {
+                    Some((last, i)) if last == key => i,
+                    _ => *slots.entry(key).or_insert_with(|| {
+                        spans.push((shadow.clone(), *at, *at + *len));
+                        spans.len() - 1
+                    }),
+                };
+                previous = Some((key, i));
                 let span = &mut spans[i];
                 span.1 = span.1.min(*at);
                 span.2 = span.2.max(*at + *len);
@@ -3398,8 +3404,12 @@ fn refresh_spans(runs: &[&HostList]) -> Vec<RefreshSpan> {
 /// may write and that the title wrote since it was last copied. The
 /// refresh leaves ranges shaders are writing alone (`Shadow::update`), so
 /// the title's bytes there would reach the card a submission late.
-fn stale_under_flights(refreshes: &[RefreshSpan]) -> Vec<RefreshSpan> {
-    let mut spans: Vec<_> = refreshes.iter().filter(|(s, _, _)| s.writes_pending()).cloned().collect();
+fn stale_under_flights(refreshes: &[RefreshSpan]) -> Vec<StaleSpan<'_>> {
+    let mut spans: Vec<_> = refreshes
+        .iter()
+        .filter(|(shadow, _, _)| shadow.writes_pending())
+        .map(|(shadow, from, to)| (shadow.as_ref(), *from, *to))
+        .collect();
     if late_exact() {
         // The title's bytes are put in beside the flights' writes; a
         // settle is still due where that could not be done. At most this
@@ -5788,11 +5798,11 @@ impl Host {
     /// a copy nobody declared any more is refreshed like any other. What
     /// they landed is title memory written, so everything is asked and
     /// looked at again; what is left after three times waits as before.
-    fn settle_stale(
+    fn settle_stale<'a>(
         &self,
         submitted: &mut u64,
-        refreshes: &[RefreshSpan],
-        mut stale: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
+        refreshes: &'a [RefreshSpan],
+        mut stale: Vec<StaleSpan<'a>>,
         ranges: &[(usize, usize)],
     ) {
         if relay_exact() && card_steps::stage() > 0 {
