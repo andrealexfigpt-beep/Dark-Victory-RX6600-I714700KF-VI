@@ -430,7 +430,7 @@ impl MemoryManager {
         };
         
         let value = self.fence_value.fetch_add(1, Ordering::AcqRel);
-        unsafe { queue.Signal(fence, value) }.ok;
+        unsafe { queue.Signal(fence, value) }.ok();
         value
     }
 
