@@ -102,6 +102,12 @@ mod watch;
 #[cfg(windows)]
 mod texback;
 
+/// Native Windows memory backend (experimental).
+/// Replaces the unified-memory translation layer with direct D3D12 allocations.
+#[cfg(windows)]
+#[cfg(feature = "native-memory")]
+pub mod native_mem;
+
 #[cfg(windows)]
 pub use host::{dispatch_fullscreen_message, on_failure};
 
@@ -126,3 +132,16 @@ pub use watch::{
     title_memory_remapping, title_memory_splitting, title_memory_unmapping, title_memory_written,
     writing as kernel_will_write,
 };
+
+/// Native memory backend exports (feature = "native-memory").
+#[cfg(all(windows, feature = "native-memory"))]
+pub use native_mem::{
+    NativeMemory, init_native_memory, native_memory, is_native_memory_active,
+    PAGE as NATIVE_PAGE, MAX_TITLE_PAGES as NATIVE_MAX_TITLE_PAGES,
+};
+
+/// Memory backend abstraction (legacy vs native).
+#[cfg(windows)]
+pub mod memory_backend;
+#[cfg(windows)]
+pub use memory_backend::{MemoryBackend, init_memory_backend, memory_backend, is_native_backend_active};
