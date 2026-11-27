@@ -1,7 +1,7 @@
 //! The offline batch: every shader found goes through the translator, and
 //! what it cannot handle yet is tallied (decision 0003).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,6 +19,15 @@ use victory_shader::{
 use victory_shader::{io, resource};
 
 use crate::shader::{MAX_FILE, Source, sources};
+
+#[cfg(windows)]
+use windows::Win32::Graphics::Direct3D12::*;
+#[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::Common::*;
+#[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::*;
+#[cfg(windows)]
+use windows::Win32::Foundation::*;
 
 #[derive(Default)]
 struct Tally {
@@ -978,6 +987,7 @@ pub fn pso_precompile(
     
     // Create host device for PSO creation.
     let host = victory_gpu::host::Host::new(false).map_err(|e| anyhow::anyhow!("Failed to create host: {}", e))?;
+    let device = &host.device;
     
     // Group permutations by container hash and stage for pairing.
     use std::collections::HashMap;
@@ -996,9 +1006,6 @@ pub fn pso_precompile(
         }
     }
     
-    // Create host device for PSO creation.
-    let host = victory_gpu::host::Host::new(false).map_err(|e| anyhow::anyhow!("Failed to create host: {}", e))?;
-    
     let mut created = 0;
     let mut failed = 0;
     let started = std::time::Instant::now();
@@ -1009,7 +1016,16 @@ pub fn pso_precompile(
             break;
         }
         let host_shader = perm.to_host_shader();
-        match host.compute_pipeline(&host_shader) {
+        let root = victory_gpu::root::serialize(&host_shader).map_err(|e| anyhow::anyhow!("Failed to serialize root: {}", e))?;
+        let desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+            pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+            CS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: host_shader.dxil.as_ptr().cast(),
+                BytecodeLength: host_shader.dxil.len(),
+            },
+            ..Default::default()
+        };
+        match unsafe { device.CreateComputePipelineState(&desc) } {
             Ok(_) => {
                 created += 1;
                 if created % 100 == 0 {
@@ -1033,26 +1049,75 @@ pub fn pso_precompile(
             }
             let vs_shader = vs_perm.to_host_shader();
             let ps_shader = ps_perm.to_host_shader();
-            match host.pipeline(&vs_shader, &ps_shader) {
-                Ok(_) => {
-                    created += 1;
-                    if created % 100 == 0 {
-                        println!("  created {}/{} graphics PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+            
+            // Build root signature from both shaders
+            let mut params = Vec::new();
+            let mut ranges = Vec::new();
+            let mut samplers = Vec::new();
+            
+            // Add VS parameters
+            let vs_root = victory_gpu::root::serialize(&vs_shader).map_err(|e| anyhow::anyhow!("Failed to serialize VS root: {}", e))?;
+            let ps_root = victory_gpu::root::serialize(&ps_shader).map_err(|e| anyhow::anyhow!("Failed to serialize PS root: {}", e))?;
+            
+            // For simplicity, use the VS root signature (in practice, both should be compatible)
+            let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+                pRootSignature: unsafe { std::mem::transmute_copy(&vs_root) },
+                VS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: vs_shader.dxil.as_ptr().cast(),
+                    BytecodeLength: vs_shader.dxil.len(),
+                },
+                PS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: ps_shader.dxil.as_ptr().cast(),
+                    BytecodeLength: ps_shader.dxil.len(),
+                },
+                SampleMask: u32::MAX,
+                RasterizerState: D3D12_RASTERIZER_DESC {
+                    FillMode: D3D12_FILL_MODE_SOLID,
+                    CullMode: D3D12_CULL_MODE_BACK,
+                    DepthClipEnable: TRUE.into(),
+                    ..Default::default()
+                },
+                DepthStencilState: D3D12_DEPTH_STENCIL_DESC {
+                    DepthEnable: TRUE.into(),
+                    DepthWriteMask: D3D12_DEPTH_WRITE_MASK_ALL,
+                    DepthFunc: D3D12_COMPARISON_FUNC_LESS,
+                    StencilReadMask: 0xff,
+                    StencilWriteMask: 0xff,
+                    FrontFace: D3D12_DEPTH_STENCILOP_DESC {
+                        StencilFailOp: D3D12_STENCIL_OP_KEEP,
+                        StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+                        StencilPassOp: D3D12_STENCIL_OP_KEEP,
+                        StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+                    },
+                    BackFace: D3D12_DEPTH_STENCILOP_DESC {
+                        StencilFailOp: D3D12_STENCIL_OP_KEEP,
+                        StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+                        StencilPassOp: D3D12_STENCIL_OP_KEEP,
+                        StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+                    },
+                    ..Default::default()
+                };
+                match unsafe { device.CreateGraphicsPipelineState(&desc) } {
+                    Ok(_) => {
+                        created += 1;
+                        if created % 100 == 0 {
+                            println!("  created {}/{} graphics PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        if failed <= 10 {
+                            println!("  graphics failed (container {:08x}): {}", 
+                                u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]), e);
+                        }
                     }
                 }
-                Err(e) => {
-                    failed += 1;
-                    if failed <= 10 {
-                        println!("  graphics failed (container {:08x}): {}", 
-                            u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]), e);
-                    }
+            } else {
+                failed += 1;
+                if failed <= 10 {
+                    println!("  VS without matching PS (container {:08x})", 
+                        u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]));
                 }
-            }
-        } else {
-            failed += 1;
-            if failed <= 10 {
-                println!("  VS without matching PS (container {:08x})", 
-                    u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]));
             }
         }
     }
@@ -1064,17 +1129,63 @@ pub fn pso_precompile(
         }
         let host_shader = perm.to_host_shader();
         let ps_shader = victory_shader::emit::host::stub_ps();
-        match host.mesh_pipeline(&host_shader, &ps_shader) {
-            Ok(_) => {
-                created += 1;
-                if created % 100 == 0 {
-                    println!("  created {}/{} mesh PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+        
+        let ms_root = victory_gpu::root::serialize(&host_shader).map_err(|e| anyhow::anyhow!("Failed to serialize MS root: {}", e))?;
+        let ps_root = victory_gpu::root::serialize(&ps_shader).map_err(|e| anyhow::anyhow!("Failed to serialize PS root: {}", e))?;
+        
+        let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+            pRootSignature: unsafe { std::mem::transmute_copy(&ms_root) },
+            VS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: host_shader.dxil.as_ptr().cast(),
+                BytecodeLength: host_shader.dxil.len(),
+            },
+            PS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: ps_shader.dxil.as_ptr().cast(),
+                BytecodeLength: ps_shader.dxil.len(),
+            },
+            SampleMask: u32::MAX,
+            RasterizerState: D3D12_RASTERIZER_DESC {
+                FillMode: D3D12_FILL_MODE_SOLID,
+                CullMode: D3D12_CULL_MODE_BACK,
+                DepthClipEnable: TRUE.into(),
+                ..Default::default()
+            },
+            DepthStencilState: D3D12_DEPTH_STENCIL_DESC {
+                DepthEnable: TRUE.into(),
+                DepthWriteMask: D3D12_DEPTH_WRITE_MASK_ALL,
+                DepthFunc: D3D12_COMPARISON_FUNC_LESS,
+                StencilReadMask: 0xff,
+                StencilWriteMask: 0xff,
+                FrontFace: D3D12_DEPTH_STENCILOP_DESC {
+                    StencilFailOp: D3D12_STENCIL_OP_KEEP,
+                    StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+                    StencilPassOp: D3D12_STENCIL_OP_KEEP,
+                    StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+                },
+                BackFace: D3D12_DEPTH_STENCILOP_DESC {
+                    StencilFailOp: D3D12_STENCIL_OP_KEEP,
+                    StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+                    StencilPassOp: D3D12_STENCIL_OP_KEEP,
+                    StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+                },
+                PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+                NumRenderTargets: 1,
+                RTVFormats: [DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN],
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                ..Default::default()
+            };
+            match unsafe { device.CreateGraphicsPipelineState(&desc) } {
+                Ok(_) => {
+                    created += 1;
+                    if created % 100 == 0 {
+                        println!("  created {}/{} mesh PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+                    }
                 }
-            }
-            Err(e) => {
-                failed += 1;
-                if failed <= 10 {
-                    println!("  mesh failed: {}", e);
+                Err(e) => {
+                    failed += 1;
+                    if failed <= 10 {
+                        println!("  mesh failed: {}", e);
+                    }
                 }
             }
         }
