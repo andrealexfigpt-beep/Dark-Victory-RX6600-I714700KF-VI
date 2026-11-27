@@ -178,6 +178,41 @@ pub(crate) fn can_use_direct_binding(
     true
 }
 
+/// Check if RDNA2-specific binding optimizations are available.
+/// RDNA2 (Navi 2x) supports direct binding with better performance.
+pub(crate) fn rdna2_binding_optimized() -> bool {
+    crate::host::memory_mgr::rebar_supported() && crate::host::memory_mgr::upload_heap_supported()
+}
+
+/// Get the optimal binding strategy for the current hardware.
+pub(crate) fn optimal_binding_strategy(is_srv: bool, is_uav: bool) -> BindingStrategy {
+    if rdna2_binding_optimized() {
+        // RDNA2 with ReBAR: prefer direct binding, use descriptor tables only when necessary
+        if is_uav {
+            BindingStrategy::DirectWithBoundsCheck
+        } else {
+            BindingStrategy::Direct
+        }
+    } else if crate::host::memory_mgr::upload_heap_supported() {
+        // GPU upload heap available but no ReBAR
+        BindingStrategy::DirectWithBoundsCheck
+    } else {
+        // Fallback: use descriptor tables for safety
+        BindingStrategy::DescriptorTable
+    }
+}
+
+/// Binding strategy for resource binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingStrategy {
+    /// Direct root descriptor binding (fastest).
+    Direct,
+    /// Direct binding with bounds checking via descriptor table.
+    DirectWithBoundsCheck,
+    /// Full descriptor table (safest, compatible).
+    DescriptorTable,
+}
+
 /// Create a root parameter for a resource binding.
 pub(crate) fn create_root_parameter(
     binding: &ResourceBinding,

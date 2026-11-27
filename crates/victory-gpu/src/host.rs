@@ -91,6 +91,14 @@ enum Retired {
 // reference-counted wrappers holding them, dropped once.
 unsafe impl Send for Retired {}
 
+/// Whether the host GPU is RDNA2 (Navi 2x).
+static RDNA2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Check if the host GPU is RDNA2 (Navi 2x).
+pub(crate) fn is_rdna2() -> bool {
+    RDNA2.load(Ordering::Acquire)
+}
+
 /// Milliseconds since the first call.
 pub(crate) fn now_ms() -> u64 {
     static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
@@ -948,7 +956,43 @@ fn create() -> windows::core::Result<Host> {
             victory_shader::emit::set_host_max_wave(o1.WaveLaneCountMax);
             // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
             let amd = crate::indirect::amd(&device);
-            victory_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);
+            let is_rdna = amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64;
+            victory_shader::emit::set_host_rdna(is_rdna);
+            
+            // Detect RDNA2 (Navi 2x) for specific optimizations.
+            // Navi 2x device IDs: 0x7300-0x73FF (RDNA2).
+            let is_rdna2 = is_rdna && {
+                let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+                if device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS,
+                    (&raw mut options).cast(),
+                    size_of_val(&options) as u32,
+                ).is_ok() {
+                    // Check if it's a Navi 2x GPU
+                    let mut adapter_desc = DXGI_ADAPTER_DESC1::default();
+                    if let Ok(factory) = unsafe { CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0)) } {
+                        if let Ok(adapter) = factory.EnumAdapterByLuid::<IDXGIAdapter1>(device.GetAdapterLuid()) {
+                            if adapter.GetDesc1().is_ok_and(|d| {
+                                d.VendorId == 0x1002 && d.DeviceId >= 0x7300 && d.DeviceId <= 0x73FF
+                            }) {
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            RDNA2.store(is_rdna2, Ordering::Relaxed);
+            if is_rdna2 {
+                tracing::info!("RDNA2 (Navi 2x) detected - enabling Navi 2x optimizations");
+            }
         }
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
