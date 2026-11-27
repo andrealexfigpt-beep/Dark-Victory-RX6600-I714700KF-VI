@@ -810,10 +810,12 @@ impl NativeMemory {
     }
 
     /// Free title virtual memory (replaces XMemVirtualFree).
+    /// Note: GPU resource lifetime is managed by D3D12 reference counting.
+    /// The heap offset is freed immediately; aliasing safety relies on
+    /// the title's own synchronization (XMemPhysicalPages semantics).
     pub fn free(&self, title_va: u64) -> bool {
+        self.gpu_bindings.remove(&title_va);
         if let Some((_, alloc)) = self.allocations.remove(&title_va) {
-            // Also remove any GPU binding
-            self.gpu_bindings.remove(&title_va);
             debug!("Freed title VA {:#x} + {:#x}", alloc.title_va, alloc.size);
             true
         } else {
