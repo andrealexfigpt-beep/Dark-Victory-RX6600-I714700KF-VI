@@ -247,6 +247,10 @@ pub fn rdna_float() -> u32 {
 }
 
 /// The bits of [`rdna_float`].
+#[cfg(test)]
+#[path = "rdna_equiv_tests.rs"]
+mod rdna_equiv_tests;
+
 pub mod rdna {
     /// `v_max_f32` and the like: the host's FMax and FMin, without the code
     /// that orders -0 below +0.
