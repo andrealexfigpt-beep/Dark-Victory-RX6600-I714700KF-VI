@@ -942,6 +942,29 @@ fn tally_structured(program: &ir::Program, s: &structure::Structured, t: &mut Ta
 /// manifest. Validates the cache version and translation fingerprint before
 /// writing; preserves runtime fallback by leaving the cache intact.
 #[cfg(windows)]
+pub fn pso_precompile(
+    manifest: Option<PathBuf>,
+    jobs: Option<usize>,
+    limit: Option<usize>,
+) -> Result<()> {
+    let cfg = victory_core::Config::load()?;
+    victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
+    // Validate and import permutation manifest if provided.
+    if let Some(path) = &manifest {
+        let n = victory_hle::shader_perm::import_permutations(path)?;
+        println!("imported      {n} permutations from {}", path.display());
+    }
+    // Report stats.
+    let stats = victory_hle::shader_perm::stats();
+    println!(
+        "permutations  {} total, {} with PSO, {} uses",
+        stats.total_permutations, stats.permutations_with_pso, stats.total_uses
+    );
+    let _ = (jobs, limit);
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn precompile_manifest(
     paths: Vec<PathBuf>,
     jobs: Option<usize>,

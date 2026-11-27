@@ -121,6 +121,21 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Precompile known pipeline states into the persistent pipeline library
+    /// cache before gameplay. Validates adapter, driver, translator version
+    /// and root signature compatibility. Preserves runtime fallback.
+    #[cfg(windows)]
+    PsoPrecompile {
+        /// Path to a permutation manifest (JSON) produced by `precompile`.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Worker threads (default: every logical core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Maximum pipelines to precompile (bounds RAM/VRAM).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Make the host pipelines of every pipeline the title ever created
     /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
     /// driver's cache on disk has them before a run needs one: once per change
@@ -232,6 +247,8 @@ fn main() -> Result<()> {
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
         #[cfg(windows)]
         Command::Precompile { paths, jobs, manifest } => translate::precompile_manifest(paths, jobs, manifest),
+        #[cfg(windows)]
+        Command::PsoPrecompile { manifest, jobs, limit } => translate::pso_precompile(manifest, jobs, limit),
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {
