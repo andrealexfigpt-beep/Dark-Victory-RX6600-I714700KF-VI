@@ -96,6 +96,14 @@ impl ShadowHandle {
         }
     }
 
+    /// Claim this copy's full refresh even when several heaps view it.
+    pub fn take_unwatched_refresh(&self, frame: u64) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.take_unwatched_refresh(frame),
+            ShadowHandle::Native(_) => true, // Native backend always refreshes
+        }
+    }
+
     /// Get the underlying D3D12 resource for descriptor creation.
     pub fn resource(&self) -> &ID3D12Resource {
         match self {

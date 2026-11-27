@@ -1318,6 +1318,28 @@ fn view_bytes() -> bool {
 
 /// The copy the buffer view of `[start, start + len)` is made on: `shadow`, the one
 /// its buffer has, or one of the view's own bytes ([`off_elements`]).
+#[cfg(all(windows, feature = "native-memory"))]
+fn view_home(
+    shadow: crate::shadow::ShadowHandle,
+    start: u64,
+    len: u64,
+    (stride, raw, format): (u32, bool, u32),
+) -> crate::shadow::ShadowHandle {
+    let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset_in(start).unwrap()) else {
+        return shadow;
+    };
+    if !view_bytes() {
+        return shadow;
+    }
+    let element = crate::resource::element(format).map_or(0, |(bytes, _)| bytes);
+    if !off_elements(offset, stride, raw, element) {
+        return shadow;
+    }
+    // For native backend, we can't create exact shadows; return the original
+    shadow
+}
+
+#[cfg(not(all(windows, feature = "native-memory")))]
 fn view_home(
     shadow: std::sync::Arc<crate::shadow::Shadow>,
     start: u64,
@@ -3508,6 +3530,38 @@ fn view_extent() -> bool {
 /// part's one), and for buffer objects, a part that also lies in a smaller
 /// buffer object. The slot then showed a copy nothing brought up to date,
 /// and what shaders wrote through it was looked for in the other copy.
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u64, u64)> {
+    let (address, len) = buffer_range(view)?;
+    if len == 0 {
+        return None;
+    }
+    if view_extent()
+        && let Some((base, width)) = buffer_extent(view)
+        // (The console is lax: a view may begin past its buffer's end.)
+        && address >= base
+        && address - base < width.max(1)
+        && let Some(shadow) = {
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(base, width)
+            } else {
+                crate::shadow::find(base, width).map(Into::into)
+            }
+        }
+    {
+        return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
+    }
+    let shadow = {
+        if crate::memory_backend::is_native_backend_active() {
+            crate::shadow::find_handle(address, len)
+        } else {
+            crate::shadow::find(address, len).map(Into::into)
+        }
+    }?;
+    Some((view_home(shadow, address, len, view_elements(view)?), address, len))
+}
+
+#[cfg(not(all(windows, feature = "native-memory")))]
 pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
@@ -3519,26 +3573,12 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::
         && address >= base
         && address - base < width.max(1)
         && let Some(shadow) = {
-            #[cfg(all(windows, feature = "native-memory"))]
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(base, width)
-            } else {
-                crate::shadow::find(base, width).map(Into::into)
-            }
-            #[cfg(not(all(windows, feature = "native-memory")))]
             crate::shadow::find(base, width).map(Into::into)
         }
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
     let shadow = {
-        #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            crate::shadow::find_handle(address, len)
-        } else {
-            crate::shadow::find(address, len).map(Into::into)
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
         crate::shadow::find(address, len).map(Into::into)
     }?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
@@ -5277,7 +5317,7 @@ mod tests {
             let (copy, ..) = buffer_copy(&v).unwrap();
             assert_ne!(copy.span().0, start + off, "its buffer's copy");
             // SAFETY: a live buffer.
-            assert_eq!(width(&v), unsafe { copy.buffer.GetDesc() }.Width);
+            assert_eq!(width(&v), unsafe { copy.resource().GetDesc() }.Width);
         }
     }
 
