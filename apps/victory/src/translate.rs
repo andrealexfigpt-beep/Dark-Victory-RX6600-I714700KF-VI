@@ -979,51 +979,102 @@ pub fn pso_precompile(
     // Create host device for PSO creation.
     let host = victory_gpu::host::Host::new(false).map_err(|e| anyhow::anyhow!("Failed to create host: {}", e))?;
     
+    // Group permutations by container hash and stage for pairing.
+    use std::collections::HashMap;
+    let mut vs_perms: HashMap<[u8; 32], &victory_gpu::shader_perm::ShaderPermutation> = HashMap::new();
+    let mut ps_perms: HashMap<[u8; 32], &victory_gpu::shader_perm::ShaderPermutation> = HashMap::new();
+    let mut cs_perms: Vec<&victory_gpu::shader_perm::ShaderPermutation> = Vec::new();
+    let mut ms_perms: Vec<&victory_gpu::shader_perm::ShaderPermutation> = Vec::new();
+    
+    for perm in &permutations {
+        match perm.key.stage {
+            NativeHwStage::Vs => { vs_perms.insert(perm.key.container_hash, perm); }
+            NativeHwStage::Ps => { ps_perms.insert(perm.key.container_hash, perm); }
+            NativeHwStage::Cs => { cs_perms.push(perm); }
+            NativeHwStage::Ms => { ms_perms.push(perm); }
+            _ => {}
+        }
+    }
+    
+    // Create host device for PSO creation.
+    let host = victory_gpu::host::Host::new(false).map_err(|e| anyhow::anyhow!("Failed to create host: {}", e))?;
+    
     let mut created = 0;
     let mut failed = 0;
     let started = std::time::Instant::now();
     
-    for (i, perm) in permutations.iter().enumerate() {
-        if created >= limit {
+    // Precompile compute shaders.
+    for perm in &cs_perms {
+        if created >= limit.unwrap_or(cs_perms.len()) {
             break;
         }
-        
-        // Reconstruct HostShader from permutation.
         let host_shader = perm.to_host_shader();
-        
-        // Try to create a pipeline for this shader.
-        // We need a compatible shader of the opposite stage for graphics pipelines.
-        let result = match host_shader.stage {
-            NativeHwStage::Vs => {
-                // Need a matching PS - for now skip if we don't have one
-                Err(anyhow::anyhow!("VS without matching PS"))
-            }
-            NativeHwStage::Ps => {
-                // Need a matching VS - for now skip if we don't have one
-                Err(anyhow::anyhow!("PS without matching VS"))
-            }
-            NativeHwStage::Cs => {
-                // Compute pipeline - can create directly
-                host.compute_pipeline(&host_shader)
-            }
-            NativeHwStage::Ms => {
-                // Mesh pipeline - need matching PS
-                Err(anyhow::anyhow!("MS without matching PS"))
-            }
-            _ => Err(anyhow::anyhow!("Unsupported stage")),
-        };
-        
-        match result {
+        match host.compute_pipeline(&host_shader) {
             Ok(_) => {
                 created += 1;
                 if created % 100 == 0 {
-                    println!("  created {}/{} PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+                    println!("  created {}/{} compute PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
                 }
             }
             Err(e) => {
                 failed += 1;
                 if failed <= 10 {
-                    println!("  failed: {}", e);
+                    println!("  compute failed: {}", e);
+                }
+            }
+        }
+    }
+    
+    // Precompile graphics pipelines by pairing VS and PS with matching container hash.
+    for (container_hash, vs_perm) in &vs_perms {
+        if let Some(ps_perm) = ps_perms.get(container_hash) {
+            if created >= limit.unwrap_or(vs_perms.len().min(ps_perms.len())) {
+                break;
+            }
+            let vs_shader = vs_perm.to_host_shader();
+            let ps_shader = ps_perm.to_host_shader();
+            match host.pipeline(&vs_shader, &ps_shader) {
+                Ok(_) => {
+                    created += 1;
+                    if created % 100 == 0 {
+                        println!("  created {}/{} graphics PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    if failed <= 10 {
+                        println!("  graphics failed (container {:08x}): {}", 
+                            u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]), e);
+                    }
+                }
+            }
+        } else {
+            failed += 1;
+            if failed <= 10 {
+                println!("  VS without matching PS (container {:08x})", 
+                    u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]));
+            }
+        }
+    }
+    
+    // Precompile mesh shaders (if any).
+    for perm in &ms_perms {
+        if created >= limit.unwrap_or(ms_perms.len()) {
+            break;
+        }
+        let host_shader = perm.to_host_shader();
+        let ps_shader = victory_shader::emit::host::stub_ps();
+        match host.mesh_pipeline(&host_shader, &ps_shader) {
+            Ok(_) => {
+                created += 1;
+                if created % 100 == 0 {
+                    println!("  created {}/{} mesh PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                if failed <= 10 {
+                    println!("  mesh failed: {}", e);
                 }
             }
         }
