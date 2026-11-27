@@ -9,7 +9,44 @@
 
 use std::ffi::{CStr, c_char, c_void};
 
+use windows_sys::Win32::System::SystemInformation::SYSTEM_INFO;
+use windows_sys::Win32::System::Threading::{CreateThread, GetCurrentThread, GetCurrentThreadId, GetThreadPriority, SetThreadPriority};
+
 use crate::{HleModule, HostPolicy, hle_export, registry, runtime};
+
+/// Extended SYSTEM_INFO for titles that expect a specific layout.
+#[repr(C)]
+pub struct SYSTEM_INFO_EX {
+    pub wProcessorArchitecture: u16,
+    pub wReserved: u16,
+    pub dwPageSize: u32,
+    pub lpMinimumApplicationAddress: *mut c_void,
+    pub lpMaximumApplicationAddress: *mut c_void,
+    pub dwActiveProcessorMask: usize,
+    pub dwNumberOfProcessors: u32,
+    pub dwProcessorType: u32,
+    pub dwAllocationGranularity: u32,
+    pub wProcessorLevel: u16,
+    pub wProcessorRevision: u16,
+}
+
+impl From<SYSTEM_INFO> for SYSTEM_INFO_EX {
+    fn from(info: SYSTEM_INFO) -> Self {
+        SYSTEM_INFO_EX {
+            wProcessorArchitecture: info.wProcessorArchitecture,
+            wReserved: info.wReserved,
+            dwPageSize: info.dwPageSize,
+            lpMinimumApplicationAddress: info.lpMinimumApplicationAddress,
+            lpMaximumApplicationAddress: info.lpMaximumApplicationAddress,
+            dwActiveProcessorMask: info.dwActiveProcessorMask as usize,
+            dwNumberOfProcessors: info.dwNumberOfProcessors,
+            dwProcessorType: info.dwProcessorType,
+            dwAllocationGranularity: info.dwAllocationGranularity,
+            wProcessorLevel: info.wProcessorLevel,
+            wProcessorRevision: info.wProcessorRevision,
+        }
+    }
+}
 
 /// `GetModuleHandleW(NULL)` must return the title's image, not our exe;
 /// title images and our console modules are found by name.
@@ -434,6 +471,601 @@ pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> 
     unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
 }
 
+/// GetThreadPriority: retrieve thread priority.
+pub extern "system" fn GetThreadPriority(thread: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetThreadPriority(thread) }
+}
+
+/// SetThreadPriorityBoost: disable/enable priority boost.
+pub extern "system" fn SetThreadPriorityBoost(thread: *mut c_void, disable_priority_boost: i32) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::SetThreadPriorityBoost(thread, disable_priority_boost) }
+}
+
+/// GetThreadPriorityBoost: check if priority boost is disabled.
+pub extern "system" fn GetThreadPriorityBoost(thread: *mut c_void, disable_priority_boost: *mut i32) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetThreadPriorityBoost(thread, disable_priority_boost) }
+}
+
+/// SetProcessPriorityBoost: disable/enable process priority boost.
+pub extern "system" fn SetProcessPriorityBoost(process: *mut c_void, disable_priority_boost: i32) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::SetProcessPriorityBoost(process, disable_priority_boost) }
+}
+
+/// GetProcessPriorityBoost: check if process priority boost is disabled.
+pub extern "system" fn GetProcessPriorityBoost(process: *mut c_void, disable_priority_boost: *mut i32) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetProcessPriorityBoost(process, disable_priority_boost) }
+}
+
+/// SetThreadIdealProcessor: set ideal processor for thread.
+pub extern "system" fn SetThreadIdealProcessor(thread: *mut c_void, processor: u32) -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::SetThreadIdealProcessor(thread, processor) }
+}
+
+/// GetThreadIdealProcessorEx: get ideal processor for thread.
+pub extern "system" fn GetThreadIdealProcessorEx(thread: *mut c_void, ideal_processor: *mut u32) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetThreadIdealProcessorEx(thread, ideal_processor) }
+}
+
+/// SetThreadAffinityMask: set thread affinity.
+pub extern "system" fn SetThreadAffinityMask(thread: *mut c_void, affinity_mask: usize) -> usize {
+    unsafe { windows_sys::Win32::System::Threading::SetThreadAffinityMask(thread, affinity_mask) }
+}
+
+/// GetProcessAffinityMask: get process affinity mask.
+pub extern "system" fn GetProcessAffinityMask(process: *mut c_void, process_affinity_mask: *mut usize, system_affinity_mask: *mut usize) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetProcessAffinityMask(process, process_affinity_mask, system_affinity_mask) }
+}
+
+/// SwitchToThread: yield to another thread.
+pub extern "system" fn SwitchToThread() -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::SwitchToThread() }
+}
+
+/// Sleep: sleep for specified milliseconds.
+pub extern "system" fn Sleep(milliseconds: u32) {
+    unsafe { windows_sys::Win32::System::Threading::Sleep(milliseconds) }
+}
+
+/// SleepEx: alertable sleep.
+pub extern "system" fn SleepEx(milliseconds: u32, alertable: i32) -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::SleepEx(milliseconds, alertable) }
+}
+
+/// CreateEventA: create event object.
+pub extern "system" fn CreateEventA(
+    security: *mut c_void,
+    manual_reset: i32,
+    initial_state: i32,
+    name: *const u8,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateEventA(security, manual_reset, initial_state, name) }
+}
+
+/// CreateEventW: create event object (wide).
+pub extern "system" fn CreateEventW(
+    security: *mut c_void,
+    manual_reset: i32,
+    initial_state: i32,
+    name: *const u16,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateEventW(security, manual_reset, initial_state, name) }
+}
+
+/// CreateEventExA: create event object with extended options.
+pub extern "system" fn CreateEventExA(
+    security: *mut c_void,
+    name: *const u8,
+    flags: u32,
+    desired_access: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateEventExA(security, name, flags, desired_access) }
+}
+
+/// CreateEventExW: create event object with extended options (wide).
+pub extern "system" fn CreateEventExW(
+    security: *mut c_void,
+    name: *const u16,
+    flags: u32,
+    desired_access: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateEventExW(security, name, flags, desired_access) }
+}
+
+/// SetEvent: signal an event.
+pub extern "system" fn SetEvent(event: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::SetEvent(event) }
+}
+
+/// ResetEvent: reset an event to non-signaled state.
+pub extern "system" fn ResetEvent(event: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::ResetEvent(event) }
+}
+
+/// PulseEvent: pulse an event (signal and reset).
+pub extern "system" fn PulseEvent(event: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::PulseEvent(event) }
+}
+
+/// WaitForSingleObject: wait for an object.
+pub extern "system" fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(handle, milliseconds) }
+}
+
+/// WaitForSingleObjectEx: alertable wait.
+pub extern "system" fn WaitForSingleObjectEx(handle: *mut c_void, milliseconds: u32, alertable: i32) -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::WaitForSingleObjectEx(handle, milliseconds, alertable) }
+}
+
+/// WaitForMultipleObjects: wait for multiple objects.
+pub extern "system" fn WaitForMultipleObjects(
+    count: u32,
+    handles: *const *mut c_void,
+    wait_all: i32,
+    milliseconds: u32,
+) -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::WaitForMultipleObjects(count, handles, wait_all, milliseconds) }
+}
+
+/// WaitForMultipleObjectsEx: alertable wait for multiple objects.
+pub extern "system" fn WaitForMultipleObjectsEx(
+    count: u32,
+    handles: *const *mut c_void,
+    wait_all: i32,
+    milliseconds: u32,
+    alertable: i32,
+) -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::WaitForMultipleObjectsEx(count, handles, wait_all, milliseconds, alertable) }
+}
+
+/// CreateMutexA: create mutex.
+pub extern "system" fn CreateMutexA(
+    security: *mut c_void,
+    initial_owner: i32,
+    name: *const u8,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateMutexA(security, initial_owner, name) }
+}
+
+/// CreateMutexW: create mutex (wide).
+pub extern "system" fn CreateMutexW(
+    security: *mut c_void,
+    initial_owner: i32,
+    name: *const u16,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateMutexW(security, initial_owner, name) }
+}
+
+/// CreateMutexExA: create mutex with extended options.
+pub extern "system" fn CreateMutexExA(
+    security: *mut c_void,
+    name: *const u8,
+    flags: u32,
+    desired_access: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateMutexExA(security, name, flags, desired_access) }
+}
+
+/// CreateMutexExW: create mutex with extended options (wide).
+pub extern "system" fn CreateMutexExW(
+    security: *mut c_void,
+    name: *const u16,
+    flags: u32,
+    desired_access: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateMutexExW(security, name, flags, desired_access) }
+}
+
+/// ReleaseMutex: release mutex ownership.
+pub extern "system" fn ReleaseMutex(mutex: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::ReleaseMutex(mutex) }
+}
+
+/// CreateSemaphoreA: create semaphore.
+pub extern "system" fn CreateSemaphoreA(
+    security: *mut c_void,
+    initial_count: i32,
+    maximum_count: i32,
+    name: *const u8,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateSemaphoreA(security, initial_count, maximum_count, name) }
+}
+
+/// CreateSemaphoreW: create semaphore (wide).
+pub extern "system" fn CreateSemaphoreW(
+    security: *mut c_void,
+    initial_count: i32,
+    maximum_count: i32,
+    name: *const u16,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateSemaphoreW(security, initial_count, maximum_count, name) }
+}
+
+/// CreateSemaphoreExA: create semaphore with extended options.
+pub extern "system" fn CreateSemaphoreExA(
+    security: *mut c_void,
+    name: *const u8,
+    flags: u32,
+    desired_access: u32,
+    initial_count: i32,
+    maximum_count: i32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateSemaphoreExA(security, name, flags, desired_access, initial_count, maximum_count) }
+}
+
+/// CreateSemaphoreExW: create semaphore with extended options (wide).
+pub extern "system" fn CreateSemaphoreExW(
+    security: *mut c_void,
+    name: *const u16,
+    flags: u32,
+    desired_access: u32,
+    initial_count: i32,
+    maximum_count: i32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateSemaphoreExW(security, name, flags, desired_access, initial_count, maximum_count) }
+}
+
+/// ReleaseSemaphore: release semaphore.
+pub extern "system" fn ReleaseSemaphore(
+    semaphore: *mut c_void,
+    release_count: i32,
+    previous_count: *mut i32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::ReleaseSemaphore(semaphore, release_count, previous_count) }
+}
+
+/// CreateWaitableTimerA: create waitable timer.
+pub extern "system" fn CreateWaitableTimerA(
+    security: *mut c_void,
+    manual_reset: i32,
+    name: *const u8,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateWaitableTimerA(security, manual_reset, name) }
+}
+
+/// CreateWaitableTimerW: create waitable timer (wide).
+pub extern "system" fn CreateWaitableTimerW(
+    security: *mut c_void,
+    manual_reset: i32,
+    name: *const u16,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateWaitableTimerW(security, manual_reset, name) }
+}
+
+/// CreateWaitableTimerExA: create waitable timer with extended options.
+pub extern "system" fn CreateWaitableTimerExA(
+    security: *mut c_void,
+    name: *const u8,
+    flags: u32,
+    desired_access: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateWaitableTimerExA(security, name, flags, desired_access) }
+}
+
+/// CreateWaitableTimerExW: create waitable timer with extended options (wide).
+pub extern "system" fn CreateWaitableTimerExW(
+    security: *mut c_void,
+    name: *const u16,
+    flags: u32,
+    desired_access: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Threading::CreateWaitableTimerExW(security, name, flags, desired_access) }
+}
+
+/// SetWaitableTimer: set a waitable timer.
+pub extern "system" fn SetWaitableTimer(
+    timer: *mut c_void,
+    due_time: *const i64,
+    period: i32,
+    completion_routine: *mut c_void,
+    arg: *mut c_void,
+    resume: i32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::SetWaitableTimer(timer, due_time, period, completion_routine, arg, resume) }
+}
+
+/// SetWaitableTimerEx: set waitable timer with extended options.
+pub extern "system" fn SetWaitableTimerEx(
+    timer: *mut c_void,
+    due_time: *const i64,
+    period: i32,
+    completion_routine: *mut c_void,
+    arg: *mut c_void,
+    resume: i32,
+    tolerance: u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::SetWaitableTimerEx(timer, due_time, period, completion_routine, arg, resume, tolerance) }
+}
+
+/// CancelWaitableTimer: cancel a waitable timer.
+pub extern "system" fn CancelWaitableTimer(timer: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::CancelWaitableTimer(timer) }
+}
+
+/// QueryPerformanceCounter: high-resolution timer.
+pub extern "system" fn QueryPerformanceCounter(lp_performance_count: *mut i64) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::QueryPerformanceCounter(lp_performance_count) }
+}
+
+/// QueryPerformanceFrequency: get timer frequency.
+pub extern "system" fn QueryPerformanceFrequency(lp_frequency: *mut i64) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::QueryPerformanceFrequency(lp_frequency) }
+}
+
+/// GetTickCount: system tick count (low resolution).
+pub extern "system" fn GetTickCount() -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::GetTickCount() }
+}
+
+/// GetTickCount64: 64-bit system tick count.
+pub extern "system" fn GetTickCount64() -> u64 {
+    unsafe { windows_sys::Win32::System::Threading::GetTickCount64() }
+}
+
+/// timeGetTime: multimedia timer.
+pub extern "system" fn timeGetTime() -> u32 {
+    unsafe { windows_sys::Win32::Media::Time::timeGetTime() }
+}
+
+/// timeBeginPeriod: set minimum timer resolution.
+pub extern "system" fn timeBeginPeriod(u_period: u32) -> u32 {
+    unsafe { windows_sys::Win32::Media::Time::timeBeginPeriod(u_period) }
+}
+
+/// timeEndPeriod: restore timer resolution.
+pub extern "system" fn timeEndPeriod(u_period: u32) -> u32 {
+    unsafe { windows_sys::Win32::Media::Time::timeEndPeriod(u_period) }
+}
+
+/// VirtualAlloc: reserve/commit memory.
+pub extern "system" fn VirtualAlloc(
+    address: *mut c_void,
+    size: usize,
+    allocation_type: u32,
+    protect: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Memory::VirtualAlloc(address, size, allocation_type, protect) }
+}
+
+/// VirtualAllocEx: allocate in another process.
+pub extern "system" fn VirtualAllocEx(
+    process: *mut c_void,
+    address: *mut c_void,
+    size: usize,
+    allocation_type: u32,
+    protect: u32,
+) -> *mut c_void {
+    unsafe { windows_sys::Win32::System::Memory::VirtualAllocEx(process, address, size, allocation_type, protect) }
+}
+
+/// VirtualFree: free/reserve memory.
+pub extern "system" fn VirtualFree(
+    address: *mut c_void,
+    size: usize,
+    free_type: u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::VirtualFree(address, size, free_type) }
+}
+
+/// VirtualFreeEx: free memory in another process.
+pub extern "system" fn VirtualFreeEx(
+    process: *mut c_void,
+    address: *mut c_void,
+    size: usize,
+    free_type: u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::VirtualFreeEx(process, address, size, free_type) }
+}
+
+/// VirtualProtect: change memory protection.
+pub extern "system" fn VirtualProtect(
+    address: *mut c_void,
+    size: usize,
+    new_protect: u32,
+    old_protect: *mut u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::VirtualProtect(address, size, new_protect, old_protect) }
+}
+
+/// VirtualProtectEx: change memory protection in another process.
+pub extern "system" fn VirtualProtectEx(
+    process: *mut c_void,
+    address: *mut c_void,
+    size: usize,
+    new_protect: u32,
+    old_protect: *mut u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::VirtualProtectEx(process, address, size, new_protect, old_protect) }
+}
+
+/// VirtualQuery: query memory information.
+pub extern "system" fn VirtualQuery(
+    address: *const c_void,
+    buffer: *mut c_void,
+    length: usize,
+) -> usize {
+    unsafe { windows_sys::Win32::System::Memory::VirtualQuery(address, buffer, length) }
+}
+
+/// VirtualQueryEx: query memory in another process.
+pub extern "system" fn VirtualQueryEx(
+    process: *mut c_void,
+    address: *const c_void,
+    buffer: *mut c_void,
+    length: usize,
+) -> usize {
+    unsafe { windows_sys::Win32::System::Memory::VirtualQueryEx(process, address, buffer, length) }
+}
+
+/// GetSystemInfo: get system information.
+pub extern "system" fn GetSystemInfo(lp_system_info: *mut c_void) {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetSystemInfo(lp_system_info) }
+}
+
+/// GetNativeSystemInfo: get native system information.
+pub extern "system" fn GetNativeSystemInfo(lp_system_info: *mut c_void) {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetNativeSystemInfo(lp_system_info) }
+}
+
+/// GetSystemTimeAsFileTime: get system time as file time.
+pub extern "system" fn GetSystemTimeAsFileTime(lp_system_time_as_file_time: *mut c_void) {
+    unsafe { windows_sys::Win32::System::Time::GetSystemTimeAsFileTime(lp_system_time_as_file_time) }
+}
+
+/// GetSystemTimePreciseAsFileTime: precise system time.
+pub extern "system" fn GetSystemTimePreciseAsFileTime(lp_system_time_as_file_time: *mut c_void) {
+    unsafe { windows_sys::Win32::System::Time::GetSystemTimePreciseAsFileTime(lp_system_time_as_file_time) }
+}
+
+/// GetLocalTime: get local time.
+pub extern "system" fn GetLocalTime(lp_system_time: *mut c_void) {
+    unsafe { windows_sys::Win32::System::Time::GetLocalTime(lp_system_time) }
+}
+
+/// GetSystemTime: get UTC time.
+pub extern "system" fn GetSystemTime(lp_system_time: *mut c_void) {
+    unsafe { windows_sys::Win32::System::Time::GetSystemTime(lp_system_time) }
+}
+
+/// SetLocalTime: set local time.
+pub extern "system" fn SetLocalTime(lp_system_time: *const c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Time::SetLocalTime(lp_system_time) }
+}
+
+/// SetSystemTime: set UTC time.
+pub extern "system" fn SetSystemTime(lp_system_time: *const c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Time::SetSystemTime(lp_system_time) }
+}
+
+/// GetSystemTimeAdjustment: get time adjustment.
+pub extern "system" fn GetSystemTimeAdjustment(
+    time_adjustment: *mut u32,
+    time_increment: *mut u32,
+    time_adjustment_disabled: *mut i32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Time::GetSystemTimeAdjustment(time_adjustment, time_increment, time_adjustment_disabled) }
+}
+
+/// SetSystemTimeAdjustment: set time adjustment.
+pub extern "system" fn SetSystemTimeAdjustment(
+    time_adjustment: u32,
+    time_adjustment_disabled: i32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Time::SetSystemTimeAdjustment(time_adjustment, time_adjustment_disabled) }
+}
+
+/// IsProcessorFeaturePresent: check processor feature.
+pub extern "system" fn IsProcessorFeaturePresent(feature: u32) -> i32 {
+    unsafe { windows_sys::Win32::System::SystemInformation::IsProcessorFeaturePresent(feature) }
+}
+
+/// GetLogicalProcessorInformation: get logical processor info.
+pub extern "system" fn GetLogicalProcessorInformation(
+    buffer: *mut c_void,
+    returned_length: *mut u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformation(buffer, returned_length) }
+}
+
+/// GetLogicalProcessorInformationEx: extended processor info.
+pub extern "system" fn GetLogicalProcessorInformationEx(
+    relationship_type: u32,
+    buffer: *mut c_void,
+    returned_length: *mut u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformationEx(relationship_type, buffer, returned_length) }
+}
+
+/// GetNumaHighestNodeNumber: get highest NUMA node.
+pub extern "system" fn GetNumaHighestNodeNumber(highest_node_number: *mut u32) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetNumaHighestNodeNumber(highest_node_number) }
+}
+
+/// GetNumaNodeProcessorMaskEx: get NUMA node processor mask.
+pub extern "system" fn GetNumaNodeProcessorMaskEx(node: u16, processor_group_mask: *mut c_void) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetNumaNodeProcessorMaskEx(node, processor_group_mask) }
+}
+
+/// GetNumaProcessorNodeEx: get NUMA node for processor.
+pub extern "system" fn GetNumaProcessorNodeEx(processor: *const c_void, node: *mut u16) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetNumaProcessorNodeEx(processor, node) }
+}
+
+/// GetNumaAvailableMemoryNodeEx: get available memory on NUMA node.
+pub extern "system" fn GetNumaAvailableMemoryNodeEx(node: u16, available_bytes: *mut u64) -> i32 {
+    unsafe { windows_sys::Win32::System::Threading::GetNumaAvailableMemoryNodeEx(node, available_bytes) }
+}
+
+/// GetProcessWorkingSetSize: get process working set size.
+pub extern "system" fn GetProcessWorkingSetSize(
+    process: *mut c_void,
+    minimum_working_set_size: *mut usize,
+    maximum_working_set_size: *mut usize,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::GetProcessWorkingSetSize(process, minimum_working_set_size, maximum_working_set_size) }
+}
+
+/// SetProcessWorkingSetSize: set process working set size.
+pub extern "system" fn SetProcessWorkingSetSize(
+    process: *mut c_void,
+    minimum_working_set_size: usize,
+    maximum_working_set_size: usize,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::SetProcessWorkingSetSize(process, minimum_working_set_size, maximum_working_set_size) }
+}
+
+/// GetProcessWorkingSetSizeEx: extended working set query.
+pub extern "system" fn GetProcessWorkingSetSizeEx(
+    process: *mut c_void,
+    minimum_working_set_size: *mut usize,
+    maximum_working_set_size: *mut usize,
+    flags: *mut u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::GetProcessWorkingSetSizeEx(process, minimum_working_set_size, maximum_working_set_size, flags) }
+}
+
+/// SetProcessWorkingSetSizeEx: extended working set control.
+pub extern "system" fn SetProcessWorkingSetSizeEx(
+    process: *mut c_void,
+    minimum_working_set_size: usize,
+    maximum_working_set_size: usize,
+    flags: u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx(process, minimum_working_set_size, maximum_working_set_size, flags) }
+}
+
+/// FlushProcessWriteBuffers: flush process write buffers.
+pub extern "system" fn FlushProcessWriteBuffers() {
+    unsafe { windows_sys::Win32::System::Memory::FlushProcessWriteBuffers() }
+}
+
+/// GetWriteWatch: get write watch information.
+pub extern "system" fn GetWriteWatch(
+    flags: u32,
+    base_address: *mut c_void,
+    region_size: usize,
+    addresses: *mut *mut c_void,
+    count: *mut u32,
+    granularity: *mut u32,
+) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::GetWriteWatch(flags, base_address, region_size, addresses, count, granularity) }
+}
+
+/// ResetWriteWatch: reset write watch.
+pub extern "system" fn ResetWriteWatch(flags: u32, base_address: *mut c_void, region_size: usize) -> i32 {
+    unsafe { windows_sys::Win32::System::Memory::ResetWriteWatch(flags, base_address, region_size) }
+}
+
+/// GetLargePageMinimum: get minimum large page size.
+pub extern "system" fn GetLargePageMinimum() -> usize {
+    unsafe { windows_sys::Win32::System::Memory::GetLargePageMinimum() }
+}
+
+/// GetSystemInfo wrapper with SYSTEM_INFO structure.
+/// This is the actual structure layout expected by titles.
+pub extern "system" fn GetSystemInfoEx(lp_system_info: *mut SYSTEM_INFO_EX) {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetSystemInfo(std::mem::transmute(lp_system_info)) }
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -469,6 +1101,86 @@ pub(crate) fn module() -> HleModule {
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
             hle_export!(SetThreadPriority),
+            hle_export!(GetThreadPriority),
+            hle_export!(SetThreadPriorityBoost),
+            hle_export!(GetThreadPriorityBoost),
+            hle_export!(SetProcessPriorityBoost),
+            hle_export!(GetProcessPriorityBoost),
+            hle_export!(SetThreadIdealProcessor),
+            hle_export!(GetThreadIdealProcessorEx),
+            hle_export!(SetThreadAffinityMask),
+            hle_export!(GetProcessAffinityMask),
+            hle_export!(SwitchToThread),
+            hle_export!(Sleep),
+            hle_export!(SleepEx),
+            hle_export!(CreateEventA),
+            hle_export!(CreateEventW),
+            hle_export!(CreateEventExA),
+            hle_export!(CreateEventExW),
+            hle_export!(SetEvent),
+            hle_export!(ResetEvent),
+            hle_export!(PulseEvent),
+            hle_export!(WaitForSingleObject),
+            hle_export!(WaitForSingleObjectEx),
+            hle_export!(WaitForMultipleObjects),
+            hle_export!(WaitForMultipleObjectsEx),
+            hle_export!(CreateMutexA),
+            hle_export!(CreateMutexW),
+            hle_export!(CreateMutexExA),
+            hle_export!(CreateMutexExW),
+            hle_export!(ReleaseMutex),
+            hle_export!(CreateSemaphoreA),
+            hle_export!(CreateSemaphoreW),
+            hle_export!(CreateSemaphoreExA),
+            hle_export!(CreateSemaphoreExW),
+            hle_export!(ReleaseSemaphore),
+            hle_export!(CreateWaitableTimerA),
+            hle_export!(CreateWaitableTimerW),
+            hle_export!(CreateWaitableTimerExA),
+            hle_export!(CreateWaitableTimerExW),
+            hle_export!(SetWaitableTimer),
+            hle_export!(SetWaitableTimerEx),
+            hle_export!(CancelWaitableTimer),
+            hle_export!(QueryPerformanceCounter),
+            hle_export!(QueryPerformanceFrequency),
+            hle_export!(GetTickCount),
+            hle_export!(GetTickCount64),
+            hle_export!(timeGetTime),
+            hle_export!(timeBeginPeriod),
+            hle_export!(timeEndPeriod),
+            hle_export!(VirtualAlloc),
+            hle_export!(VirtualAllocEx),
+            hle_export!(VirtualFree),
+            hle_export!(VirtualFreeEx),
+            hle_export!(VirtualProtect),
+            hle_export!(VirtualProtectEx),
+            hle_export!(VirtualQuery),
+            hle_export!(VirtualQueryEx),
+            hle_export!(GetSystemInfo),
+            hle_export!(GetNativeSystemInfo),
+            hle_export!(GetSystemTimeAsFileTime),
+            hle_export!(GetSystemTimePreciseAsFileTime),
+            hle_export!(GetLocalTime),
+            hle_export!(GetSystemTime),
+            hle_export!(SetLocalTime),
+            hle_export!(SetSystemTime),
+            hle_export!(GetSystemTimeAdjustment),
+            hle_export!(SetSystemTimeAdjustment),
+            hle_export!(IsProcessorFeaturePresent),
+            hle_export!(GetLogicalProcessorInformation),
+            hle_export!(GetLogicalProcessorInformationEx),
+            hle_export!(GetNumaHighestNodeNumber),
+            hle_export!(GetNumaNodeProcessorMaskEx),
+            hle_export!(GetNumaProcessorNodeEx),
+            hle_export!(GetNumaAvailableMemoryNodeEx),
+            hle_export!(GetProcessWorkingSetSize),
+            hle_export!(SetProcessWorkingSetSize),
+            hle_export!(GetProcessWorkingSetSizeEx),
+            hle_export!(SetProcessWorkingSetSizeEx),
+            hle_export!(FlushProcessWriteBuffers),
+            hle_export!(GetWriteWatch),
+            hle_export!(ResetWriteWatch),
+            hle_export!(GetLargePageMinimum),
         ],
     }
 }
