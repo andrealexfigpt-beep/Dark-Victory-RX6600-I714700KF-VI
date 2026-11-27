@@ -937,6 +937,35 @@ fn tally_structured(program: &ir::Program, s: &structure::Structured, t: &mut Ta
     }
 }
 
+/// `precompile --manifest <path>`: run the normal shader precompile, then
+/// export the recorded permutation tracker's data to a versioned JSON
+/// manifest. Validates the cache version and translation fingerprint before
+/// writing; preserves runtime fallback by leaving the cache intact.
+#[cfg(windows)]
+pub fn precompile_manifest(
+    paths: Vec<PathBuf>,
+    jobs: Option<usize>,
+    manifest: Option<PathBuf>,
+) -> Result<()> {
+    // Run the standard precompile into the shader cache first.
+    precompile(paths.clone(), jobs)?;
+    // Validate translation fingerprint is present.
+    let fp = victory_shader::emit::translation_fingerprint();
+    // Export permutation manifest if requested.
+    if let Some(out) = manifest {
+        victory_hle::shader_perm::export_permutations(&out)?;
+        println!("manifest     {} (fingerprint {:x?})", out.display(), &fp[..4]);
+    } else {
+        // Default location under cache dir.
+        let cfg = victory_core::Config::load()?;
+        let dir = cfg.cache_subdir("shaders")?;
+        let out = dir.join("permutations.json");
+        victory_hle::shader_perm::export_permutations(&out)?;
+        println!("manifest     {} (fingerprint {:x?})", out.display(), &fp[..4]);
+    }
+    Ok(())
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }

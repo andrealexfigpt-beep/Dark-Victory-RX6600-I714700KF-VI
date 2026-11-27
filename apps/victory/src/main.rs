@@ -105,6 +105,22 @@ enum Command {
         #[arg(long)]
         jobs: Option<usize>,
     },
+    /// Precompile shaders ahead of time and export a versioned permutation
+    /// manifest for offline compilation and cache warming. Validates the
+    /// cache version and translation fingerprint before writing.
+    /// Precompile shaders ahead of time and export a versioned permutation
+    /// manifest for offline compilation and cache warming. Validates the
+    /// cache version and translation fingerprint before writing.
+    #[cfg(windows)]
+    Precompile {
+        paths: Vec<PathBuf>,
+        /// Worker threads (default: every logical core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Output path for the permutation manifest (JSON).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
     /// Make the host pipelines of every pipeline the title ever created
     /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
     /// driver's cache on disk has them before a run needs one: once per change
@@ -214,6 +230,8 @@ fn main() -> Result<()> {
             translate::run(paths, validate, pipelines, list, jobs)
         }
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        #[cfg(windows)]
+        Command::Precompile { paths, jobs, manifest } => translate::precompile_manifest(paths, jobs, manifest),
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {

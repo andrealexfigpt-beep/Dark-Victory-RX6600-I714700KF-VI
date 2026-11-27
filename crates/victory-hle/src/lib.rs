@@ -15,6 +15,8 @@ mod host;
 mod image_watch;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub use victory_gpu::frame_phase;
+#[cfg(windows)]
+pub use victory_gpu::shader_perm;
 
 pub mod modules;
 mod registry;
