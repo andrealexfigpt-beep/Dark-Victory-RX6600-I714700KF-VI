@@ -59,6 +59,8 @@ pub(crate) struct Host {
     /// The adapter the device is on, for its memory budget
     /// ([`Host::video_memory`]); `None` if the system does not name it.
     adapter: Option<IDXGIAdapter3>,
+    /// Command allocator and list pool for reuse (Phase 3 Native Graphics).
+    command_pool: crate::host::command_pool::CommandPool,
 }
 
 // SAFETY: D3D12 devices, queues, fences and descriptor heaps are
@@ -975,6 +977,10 @@ fn create() -> windows::core::Result<Host> {
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
         tracing::info!("host D3D12 device ready");
+        
+        // Initialize command pool (Phase 3 Native Graphics).
+        let command_pool = crate::host::command_pool::CommandPool::new(&device)?;
+        
         Ok(Host {
             device,
             queue,
@@ -991,6 +997,7 @@ fn create() -> windows::core::Result<Host> {
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
             adapter,
+            command_pool,
         })
     }
 }
@@ -1001,6 +1008,11 @@ impl Host {
         let adapter = self.adapter.as_ref();
         // SAFETY: a plain query.
         adapter.map_or(0, |a| unsafe { a.CheckInterfaceSupport(&IDXGIDevice::IID) }.unwrap_or(0))
+    }
+
+    /// Get the command pool for allocator/list reuse (Phase 3 Native Graphics).
+    pub(crate) fn command_pool(&self) -> &crate::host::command_pool::CommandPool {
+        &self.command_pool
     }
 }
 
@@ -4160,6 +4172,7 @@ mod torn;
 #[cfg(feature = "diagnostics")]
 mod traffic;
 pub(crate) mod upcheck;
+pub(crate) mod command_pool;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
@@ -4481,7 +4494,13 @@ impl Host {
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         let before = private_bytes();
-        let list = self.make_list();
+        
+        // Use command pool for allocator reuse (Phase 3 Native Graphics).
+        let pooled_alloc = self.command_pool().get_direct_allocator()?;
+        let list = pooled_alloc.create_list()?;
+        
+        let host_list = self.make_host_list(pooled_alloc.allocator().clone(), list)?;
+        
         LISTS[0].fetch_add(1, Ordering::Relaxed);
         // (May shrink while a list is made, on another thread's account:
         // added as it is, the sum is what counts.)
@@ -4493,7 +4512,7 @@ impl Host {
             add(C::HostLists, 1);
             add(C::HostListNs, started.elapsed().as_nanos() as u64);
         }
-        list
+        Ok(host_list)
     }
 
     /// An allocator and a closed list for a prelude.
@@ -4521,33 +4540,49 @@ impl Host {
     }
 
     fn make_list(&self) -> windows::core::Result<HostList> {
-        // SAFETY: plain object creation.
-        unsafe {
-            let allocator: ID3D12CommandAllocator = self
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
-            let list: ID3D12GraphicsCommandList = self.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &allocator,
-                None,
-            )?;
+        // Use command pool for allocator reuse (Phase 3 Native Graphics).
+        let pooled_alloc = self.command_pool().get_direct_allocator()?;
+        let list = pooled_alloc.create_list()?;
+        
+        #[cfg(feature = "diagnostics")]
+        if dred_on() || dred_light() {
+            static NUMBER: AtomicU32 = AtomicU32::new(0);
+            let number = NUMBER.fetch_add(1, Ordering::Relaxed);
+            name(&list, || format!("victory host list {number}"));
+            let mut all = LIST_NOTES.lock().unwrap_or_else(|e| e.into_inner());
+            if number.is_multiple_of(256) {
+                all.retain(|_, l| l.0.strong_count() > 0);
+            }
+        }
+        
+        self.make_host_list(pooled_alloc.allocator().clone(), list)
+    }
+
+    /// Common HostList construction from allocator and list.
+    fn make_host_list(&self, allocator: ID3D12CommandAllocator, list: ID3D12GraphicsCommandList) -> windows::core::Result<HostList> {
+        Ok(HostList {
+            allocator,
+            list,
+            deferred: Mutex::default(),
+            scratch: Mutex::default(),
+            states: Mutex::default(),
+            twins: Mutex::default(),
+            pipelines: std::sync::Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             #[cfg(feature = "diagnostics")]
-            pass_begin(&list);
+            indirects: indirects::Shared::default(),
+            budget: OnceLock::new(),
+            card_budget: OnceLock::new(),
+            indirect_args: Mutex::default(),
+            batch_args: Mutex::default(),
+            coming: Mutex::default(),
+            epoch: std::sync::atomic::AtomicU64::new(crate::host::next_epoch()),
+            _alive: Counted::new(),
             #[cfg(feature = "diagnostics")]
-            let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
-            let pipelines = std::sync::Arc::<Mutex<std::collections::BTreeSet<String>>>::default();
+            notes: std::sync::Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "diagnostics")]
-            let indirects = indirects::Shared::default();
-            #[cfg(feature = "diagnostics")]
-            if dred_on() || dred_light() {
-                static NUMBER: AtomicU32 = AtomicU32::new(0);
-                let number = NUMBER.fetch_add(1, Ordering::Relaxed);
-                name(&list, || format!("victory host list {number}"));
-                let mut all = LIST_NOTES.lock().unwrap_or_else(|e| e.into_inner());
-                if number.is_multiple_of(256) {
-                    all.retain(|_, l| l.0.strong_count() > 0);
-                }
+            stamps: OnceLock::new(),
+        })
+    }
                 all.insert(
                     number,
                     (
