@@ -22,6 +22,7 @@ blake3.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+fastrand = "2.0"
 
 [features]
 # Debugging switches (frame capture, the host debug layer, per-draw data).

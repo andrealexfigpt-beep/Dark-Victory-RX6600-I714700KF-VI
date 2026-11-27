@@ -12,9 +12,11 @@
 mod native_mem_tests {
     use std::sync::Arc;
     use std::thread;
+    use std::time::Instant;
 
     use windows::Win32::Graphics::Direct3D12::*;
     use windows::Win32::Graphics::Dxgi::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
 
     use victory_gpu::native_mem::{NativeMemory, PAGE};
     use victory_gpu::host::{host, Host};
@@ -322,6 +324,286 @@ mod native_mem_tests {
         // And the offset calculation should work
         assert_eq!(mem.get_gpu_va(va1), Some(gpu_va1));
         assert_eq!(mem.get_gpu_va(va2), Some(gpu_va2));
+    }
+
+    #[test]
+    fn test_aliased_resource() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        // Create source resource
+        let source_va = 0xD000_0000;
+        let size = PAGE * 4;
+        mem.allocate(source_va, size, 0x04, false).expect("Source alloc failed");
+        let source_gpu_va = mem.create_gpu_resource(source_va, size, true).expect("Source GPU resource failed");
+
+        // Create aliased resource at same heap location
+        let alias_va = 0xD100_0000;
+        let alias_gpu_va = mem.create_aliased_resource(alias_va, source_va, size, true).expect("Aliased resource failed");
+
+        // Aliased resource should have different GPU VA but same heap offset
+        assert_ne!(source_gpu_va, alias_gpu_va);
+        assert!(mem.has_gpu_binding(alias_va));
+        assert_eq!(mem.get_gpu_va(alias_va), Some(alias_gpu_va));
+
+        // Verify both can be used independently
+        let data1 = vec![0x11; size as usize];
+        let data2 = vec![0x22; size as usize];
+        mem.upload_to_gpu(source_va, 0, &data1).expect("Source upload failed");
+        mem.upload_to_gpu(alias_va, 0, &data2).expect("Alias upload failed");
+
+        // Readback should show different data
+        let readback1 = mem.readback_from_gpu(source_va, 0, size).expect("Source readback failed");
+        let readback2 = mem.readback_from_gpu(alias_va, 0, size).expect("Alias readback failed");
+        assert_eq!(readback1, data1);
+        assert_eq!(readback2, data2);
+    }
+
+    #[test]
+    fn test_texture_creation() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        let va = 0xE000_0000;
+        
+        // Test BC3 compressed texture with mipmaps
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: 1024,
+            Height: 1024,
+            DepthOrArraySize: 1,
+            MipLevels: 10,
+            Format: DXGI_FORMAT_BC3_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        };
+
+        let gpu_va = mem.create_gpu_texture(va, &desc, true).expect("Texture creation failed");
+        assert_ne!(gpu_va, 0);
+        assert!(mem.has_gpu_binding(va));
+        assert_eq!(mem.get_gpu_va(va), Some(gpu_va));
+    }
+
+    #[test]
+    fn test_blas_tlas_creation() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device.clone(), copy_queue.clone()).expect("Failed to create native memory");
+
+        // Test BLAS creation
+        let blas_va = 0xF000_0000;
+        let blas_size = 64 * 1024; // 64 KiB
+        let build_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
+            Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
+            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS(0),
+            NumDescs: 1,
+            DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
+            pGeometryDescs: std::ptr::null(),
+            ..Default::default()
+        };
+        
+        let blas_gpu_va = mem.create_blas(blas_va, blas_size, &build_inputs).expect("BLAS creation failed");
+        assert_ne!(blas_gpu_va, 0);
+        assert!(mem.has_gpu_binding(blas_va));
+
+        // Test TLAS creation
+        let tlas_va = 0xF100_0000;
+        let tlas_size = 64 * 1024;
+        let tlas_gpu_va = mem.create_tlas(tlas_va, tlas_size).expect("TLAS creation failed");
+        assert_ne!(tlas_gpu_va, 0);
+        assert!(mem.has_gpu_binding(tlas_va));
+
+        // Test prebuild info
+        let prebuild_info = mem.get_acceleration_structure_prebuild_info(&build_inputs);
+        assert!(prebuild_info.ResultDataMaxSizeInBytes > 0);
+        assert!(prebuild_info.ScratchDataSizeInBytes > 0);
+    }
+}
+
+// Synthetic benchmarks comparing legacy vs native backends
+#[cfg(all(windows, feature = "native-memory"))]
+mod benchmarks {
+    use super::*;
+    use std::time::Instant;
+    use std::sync::Arc;
+
+    #[test]
+    fn benchmark_allocation_latency() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        const ITERATIONS: usize = 10000;
+        let start = Instant::now();
+        
+        for i in 0..ITERATIONS {
+            let va = 0x1000_0000 + i * PAGE * 4;
+            mem.allocate(va, PAGE, 0x04, false).expect("Allocation failed");
+        }
+        
+        let alloc_time = start.elapsed();
+        println!("Allocation latency: {:?} for {} allocations ({:?} per alloc)", 
+            alloc_time, ITERATIONS, alloc_time / ITERATIONS as u32);
+        
+        // Cleanup
+        for i in 0..ITERATIONS {
+            let va = 0x1000_0000 + i * PAGE * 4;
+            mem.free(va);
+        }
+    }
+
+    #[test]
+    fn benchmark_gpu_resource_creation() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        const ITERATIONS: usize = 1000;
+        // Pre-allocate memory
+        for i in 0..ITERATIONS {
+            let va = 0x2000_0000 + i * PAGE * 4;
+            mem.allocate(va, PAGE, 0x04, false).expect("Allocation failed");
+        }
+
+        let start = Instant::now();
+        
+        for i in 0..ITERATIONS {
+            let va = 0x2000_0000 + i * PAGE * 4;
+            mem.create_gpu_resource(va, PAGE, true).expect("GPU resource creation failed");
+        }
+        
+        let create_time = start.elapsed();
+        println!("GPU resource creation: {:?} for {} resources ({:?} per resource)", 
+            create_time, ITERATIONS, create_time / ITERATIONS as u32);
+        
+        // Cleanup
+        for i in 0..ITERATIONS {
+            let va = 0x2000_0000 + i * PAGE * 4;
+            mem.free(va);
+        }
+    }
+
+    #[test]
+    fn benchmark_upload_throughput() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        const BUFFER_SIZE: u64 = 1024 * 1024; // 1 MiB
+        const ITERATIONS: usize = 100;
+        
+        let va = 0x3000_0000;
+        mem.allocate(va, BUFFER_SIZE, 0x04, false).expect("Allocation failed");
+        mem.create_gpu_resource(va, BUFFER_SIZE, true).expect("GPU resource creation failed");
+
+        let test_data = vec![0xAA; BUFFER_SIZE as usize];
+        
+        let start = Instant::now();
+        
+        for _ in 0..ITERATIONS {
+            mem.upload_to_gpu(va, 0, &test_data).expect("Upload failed");
+        }
+        
+        let upload_time = start.elapsed();
+        let total_bytes = BUFFER_SIZE * ITERATIONS as u64;
+        let throughput_mb_s = (total_bytes as f64 / 1024.0 / 1024.0) / upload_time.as_secs_f64();
+        println!("Upload throughput: {:.2} MB/s ({:?} for {} MiB)", 
+            throughput_mb_s, upload_time, total_bytes / 1024 / 1024);
+    }
+
+    #[test]
+    fn benchmark_readback_throughput() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        const BUFFER_SIZE: u64 = 1024 * 1024; // 1 MiB
+        const ITERATIONS: usize = 50;
+        
+        let va = 0x4000_0000;
+        mem.allocate(va, BUFFER_SIZE, 0x04, false).expect("Allocation failed");
+        mem.create_gpu_resource(va, BUFFER_SIZE, true).expect("GPU resource creation failed");
+
+        let test_data = vec![0xBB; BUFFER_SIZE as usize];
+        mem.upload_to_gpu(va, 0, &test_data).expect("Initial upload failed");
+        
+        let start = Instant::now();
+        
+        for _ in 0..ITERATIONS {
+            let _ = mem.readback_from_gpu(va, 0, BUFFER_SIZE).expect("Readback failed");
+        }
+        
+        let readback_time = start.elapsed();
+        let total_bytes = BUFFER_SIZE * ITERATIONS as u64;
+        let throughput_mb_s = (total_bytes as f64 / 1024.0 / 1024.0) / readback_time.as_secs_f64();
+        println!("Readback throughput: {:.2} MB/s ({:?} for {} MiB)", 
+            throughput_mb_s, readback_time, total_bytes / 1024 / 1024);
+    }
+
+    #[test]
+    fn benchmark_concurrent_access() {
+        let (device, copy_queue) = create_test_device();
+        let mem = Arc::new(NativeMemory::new(device, copy_queue).expect("Failed to create native memory"));
+
+        const THREADS: usize = 8;
+        const OPS_PER_THREAD: usize = 10000;
+        
+        // Pre-populate
+        for i in 0..1000 {
+            let va = 0x5000_0000 + i * PAGE * 4;
+            mem.allocate(va, PAGE, 0x04, false).expect("Pre-populate failed");
+            mem.create_gpu_resource(va, PAGE, true).expect("GPU resource failed");
+        }
+
+        let start = Instant::now();
+        let handles: Vec<_> = (0..THREADS).map(|_| {
+            let mem = mem.clone();
+            std::thread::spawn(move || {
+                for _ in 0..OPS_PER_THREAD {
+                    let idx = fastrand::usize(0..1000);
+                    let va = 0x5000_0000 + idx * PAGE * 4;
+                    let _ = mem.get_allocation(va);
+                    let _ = mem.get_gpu_va(va);
+                }
+            })
+        }).collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        
+        let concurrent_time = start.elapsed();
+        let total_ops = THREADS * OPS_PER_THREAD * 2; // get_allocation + get_gpu_va
+        println!("Concurrent access: {:?} for {} ops ({:?} per op)", 
+            concurrent_time, total_ops, concurrent_time / total_ops as u32);
+    }
+
+    #[test]
+    fn benchmark_memory_consumption() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        const RESOURCE_COUNT: usize = 10000;
+        const RESOURCE_SIZE: u64 = 256 * 1024; // 256 KiB
+        
+        let start = Instant::now();
+        
+        for i in 0..RESOURCE_COUNT {
+            let va = 0x6000_0000 + i * RESOURCE_SIZE;
+            mem.allocate(va, RESOURCE_SIZE, 0x04, false).expect("Allocation failed");
+            mem.create_gpu_resource(va, RESOURCE_SIZE, true).expect("GPU resource failed");
+        }
+        
+        let creation_time = start.elapsed();
+        let total_memory = RESOURCE_COUNT as u64 * RESOURCE_SIZE;
+        println!("Memory consumption test: {:?} for {} resources ({} MB total)", 
+            creation_time, RESOURCE_COUNT, total_memory / 1024 / 1024);
+        
+        // Report stats
+        mem.next_frame();
+        
+        // Cleanup
+        for i in 0..RESOURCE_COUNT {
+            let va = 0x6000_0000 + i * RESOURCE_SIZE;
+            mem.free(va);
+        }
     }
 }
 

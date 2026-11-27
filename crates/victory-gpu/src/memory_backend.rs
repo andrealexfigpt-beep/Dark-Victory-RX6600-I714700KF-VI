@@ -19,8 +19,18 @@ pub trait MemoryBackend: Send + Sync {
     /// Create a GPU texture resource bound to title virtual memory.
     fn create_gpu_texture(&self, title_va: u64, desc: &D3D12_RESOURCE_DESC, uav: bool) -> anyhow::Result<u64>; // Returns GPU VA
 
-    /// Upload data to GPU resource.
+    /// Upload data to GPU buffer resource.
     fn upload_to_gpu(&self, title_va: u64, offset: u64, data: &[u8]) -> anyhow::Result<()>;
+
+    /// Upload texture data to GPU texture resource (all subresources).
+    fn upload_full_texture_to_gpu(
+        &self,
+        title_va: u64,
+        data: &[u8],
+        subresource_data: &[D3D12_SUBRESOURCE_DATA],
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
 
     /// Read back data from GPU resource.
     fn readback_from_gpu(&self, title_va: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>;
@@ -33,6 +43,51 @@ pub trait MemoryBackend: Send + Sync {
 
     /// Advance frame counter.
     fn next_frame(&self);
+
+    /// Create an aliased GPU resource (XMemPhysicalPages aliasing).
+    fn create_aliased_resource(
+        &self,
+        title_va: u64,
+        source_title_va: u64,
+        size: u64,
+        uav: bool,
+    ) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+
+    /// Create an aliased GPU texture.
+    fn create_aliased_texture(
+        &self,
+        title_va: u64,
+        source_title_va: u64,
+        desc: &D3D12_RESOURCE_DESC,
+        uav: bool,
+    ) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+
+    /// Create a bottom-level acceleration structure (BLAS) buffer.
+    fn create_blas(
+        &self,
+        title_va: u64,
+        size: u64,
+        build_inputs: &D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS,
+    ) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+
+    /// Create a top-level acceleration structure (TLAS) buffer.
+    fn create_tlas(&self, title_va: u64, size: u64) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+
+    /// Get acceleration structure prebuild info.
+    fn get_acceleration_structure_prebuild_info(
+        &self,
+        build_inputs: &D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS,
+    ) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default()
+    }
 
     /// Create a shadow copy for a title buffer (legacy path).
     fn create_shadow_buffer(&self, title_va: u64, size: u64, window: bool) -> anyhow::Result<u64> {
@@ -222,6 +277,15 @@ impl MemoryBackend for NativeBackend {
         self.inner.upload_to_gpu(title_va, offset, data)
     }
 
+    fn upload_full_texture_to_gpu(
+        &self,
+        title_va: u64,
+        data: &[u8],
+        subresource_data: &[D3D12_SUBRESOURCE_DATA],
+    ) -> anyhow::Result<()> {
+        self.inner.upload_full_texture_to_gpu(title_va, data, subresource_data)
+    }
+
     fn readback_from_gpu(&self, title_va: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
         self.inner.readback_from_gpu(title_va, offset, size)
     }
@@ -236,6 +300,50 @@ impl MemoryBackend for NativeBackend {
 
     fn next_frame(&self) {
         self.inner.next_frame();
+    }
+
+    fn create_aliased_resource(
+        &self,
+        title_va: u64,
+        source_title_va: u64,
+        size: u64,
+        uav: bool,
+    ) -> anyhow::Result<u64> {
+        let binding = self.inner.create_aliased_resource(title_va, source_title_va, size, uav)?;
+        Ok(binding.gpu_va)
+    }
+
+    fn create_aliased_texture(
+        &self,
+        title_va: u64,
+        source_title_va: u64,
+        desc: &D3D12_RESOURCE_DESC,
+        uav: bool,
+    ) -> anyhow::Result<u64> {
+        let binding = self.inner.create_aliased_texture(title_va, source_title_va, desc, uav)?;
+        Ok(binding.gpu_va)
+    }
+
+    fn create_blas(
+        &self,
+        title_va: u64,
+        size: u64,
+        build_inputs: &D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS,
+    ) -> anyhow::Result<u64> {
+        let binding = self.inner.create_blas(title_va, size, build_inputs)?;
+        Ok(binding.gpu_va)
+    }
+
+    fn create_tlas(&self, title_va: u64, size: u64) -> anyhow::Result<u64> {
+        let binding = self.inner.create_tlas(title_va, size)?;
+        Ok(binding.gpu_va)
+    }
+
+    fn get_acceleration_structure_prebuild_info(
+        &self,
+        build_inputs: &D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS,
+    ) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
+        self.inner.get_acceleration_structure_prebuild_info(build_inputs)
     }
 }
 
