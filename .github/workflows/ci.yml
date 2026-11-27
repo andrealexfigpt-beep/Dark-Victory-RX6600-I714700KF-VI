@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, native-memory-v1]
 
 permissions:
   contents: read
@@ -31,3 +31,17 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
+
+  native-memory:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with native-memory and diagnostics
+        run: cargo build --workspace --features "native-memory,diagnostics" --locked
+      - name: Run native memory tests
+        run: cargo test --workspace --features "native-memory,diagnostics" --locked native_mem
+      - name: Run all tests with native backend
+        run: cargo test --workspace --features "native-memory,diagnostics" --locked
