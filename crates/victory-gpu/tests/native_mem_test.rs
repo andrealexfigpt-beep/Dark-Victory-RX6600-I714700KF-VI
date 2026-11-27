@@ -361,6 +361,110 @@ mod native_mem_tests {
     }
 
     #[test]
+    fn test_overlapping_memory_ranges() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        // Test that overlapping VAs are handled correctly
+        // First allocation at base VA
+        let va1 = 0xE000_0000;
+        let size1 = PAGE * 8; // 512 KiB
+        mem.allocate(va1, size1, 0x04, false).expect("Alloc 1 failed");
+        let gpu_va1 = mem.create_gpu_resource(va1, size1, true).expect("GPU 1 failed");
+
+        // Second allocation that overlaps with first (should fail or be handled)
+        // In the native backend, each VA is tracked independently
+        // Overlapping VAs would be separate allocations with separate GPU resources
+        let va2 = va1 + PAGE * 2; // Overlaps with va1
+        let size2 = PAGE * 4;
+        mem.allocate(va2, size2, 0x04, false).expect("Alloc 2 failed");
+        let gpu_va2 = mem.create_gpu_resource(va2, size2, true).expect("GPU 2 failed");
+
+        // They should have different GPU VAs (different resources)
+        assert_ne!(gpu_va1, gpu_va2);
+
+        // Write to overlapping region through both VAs
+        let data1 = vec![0x11; size1 as usize];
+        let data2 = vec![0x22; size2 as usize];
+        mem.upload_to_gpu(va1, 0, &data1).expect("Upload 1 failed");
+        mem.upload_to_gpu(va2, 0, &data2).expect("Upload 2 failed");
+
+        // Read back from both
+        let readback1 = mem.readback_from_gpu(va1, 0, size1).expect("Readback 1 failed");
+        let readback2 = mem.readback_from_gpu(va2, 0, size2).expect("Readback 2 failed");
+
+        // Each readback should show the data written through that VA
+        // (They are separate resources, so no actual overlap in GPU memory)
+        assert_eq!(readback1, data1);
+        assert_eq!(readback2, data2);
+    }
+
+    #[test]
+    fn test_aliasing_barrier_synchronization() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        // Create source resource
+        let source_va = 0xF000_0000;
+        let size = PAGE * 4;
+        mem.allocate(source_va, size, 0x04, false).expect("Source alloc failed");
+        let source_gpu_va = mem.create_gpu_resource(source_va, size, true).expect("Source GPU resource failed");
+
+        // Create aliased resource at same heap location
+        let alias_va = 0xF100_0000;
+        let alias_gpu_va = mem.create_aliased_resource(alias_va, source_va, size, true).expect("Aliased resource failed");
+
+        // Upload different data through each VA
+        let data1 = vec![0xAA; size as usize];
+        let data2 = vec![0xBB; size as usize];
+        mem.upload_to_gpu(source_va, 0, &data1).expect("Source upload failed");
+        mem.upload_to_gpu(alias_va, 0, &data2).expect("Alias upload failed");
+
+        // In D3D12, aliased resources share the same heap memory
+        // The last write wins (data2), but we need proper synchronization
+        // Read back from both - they share the same physical memory
+        let readback1 = mem.readback_from_gpu(source_va, 0, size).expect("Source readback failed");
+        let readback2 = mem.readback_from_gpu(alias_va, 0, size).expect("Alias readback failed");
+
+        // Since they're aliased to the same heap, both should show the last write
+        // (data2 from alias_va upload which happened after source_va upload)
+        // Note: This depends on GPU execution order; fence synchronization ensures ordering
+        assert_eq!(readback1, readback2, "Aliased resources should show same data");
+    }
+
+    #[test]
+    fn test_aliased_texture_barrier() {
+        let (device, copy_queue) = create_test_device();
+        let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
+
+        // Create source texture
+        let source_va = 0xF200_0000;
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: 256,
+            Height: 256,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        };
+        mem.allocate(source_va, PAGE * 4, 0x04, false).expect("Source texture alloc failed");
+        let source_gpu_va = mem.create_gpu_texture(source_va, &desc, true).expect("Source texture failed");
+
+        // Create aliased texture
+        let alias_va = 0xF300_0000;
+        let alias_gpu_va = mem.create_aliased_texture(alias_va, source_va, &desc, true).expect("Aliased texture failed");
+
+        // Both should be valid
+        assert_ne!(source_gpu_va, alias_gpu_va);
+        assert!(mem.has_gpu_binding(source_va));
+        assert!(mem.has_gpu_binding(alias_va));
+    }
+
+    #[test]
     fn test_texture_creation() {
         let (device, copy_queue) = create_test_device();
         let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
