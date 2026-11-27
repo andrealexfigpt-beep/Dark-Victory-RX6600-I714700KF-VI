@@ -35,6 +35,19 @@ use victory_gpu::pipeline::library::use_pipeline_cache;
 #[cfg(windows)]
 use victory_hle::runtime::{use_console_timers, set_main_image};
 
+#[cfg(windows)]
+use windows::Win32::Graphics::Direct3D12::*;
+#[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::Common::*;
+#[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::*;
+#[cfg(windows)]
+use windows::Win32::Foundation::*;
+#[cfg(windows)]
+use windows::Win32::System::Memory::*;
+#[cfg(windows)]
+use windows::core::Interface;
+
 /// Execution mode for the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutionMode {
