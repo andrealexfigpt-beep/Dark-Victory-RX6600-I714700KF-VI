@@ -77,6 +77,18 @@ impl Drop for HostAllocation {
     }
 }
 
+impl Drop for NativeMemory {
+    fn drop(&mut self) {
+        // Close event handles
+        if !self.copy_fence_event.is_null() {
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(self.copy_fence_event);
+            }
+        }
+        // UploadRing and ReadbackRing events are dropped with their structs
+    }
+}
+
 /// A GPU resource bound to a title virtual address range.
 #[derive(Debug, Clone)]
 struct GpuResourceBinding {
@@ -548,6 +560,17 @@ impl UploadRing {
     }
 }
 
+impl Drop for UploadRing {
+    fn drop(&mut self) {
+        if !self.fence_event.is_null() {
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(self.fence_event);
+            }
+        }
+        // Resource and fence are reference-counted, will be dropped automatically
+    }
+}
+
 /// Persistent ring buffer for readbacks (GPU -> CPU).
 /// Uses fence-safe wraparound to prevent reuse of in-flight memory.
 #[derive(Debug)]
@@ -687,6 +710,16 @@ impl ReadbackRing {
     
     fn completed_fence(&self) -> u64 {
         unsafe { self.fence.GetCompletedValue() }
+    }
+}
+
+impl Drop for ReadbackRing {
+    fn drop(&mut self) {
+        if !self.fence_event.is_null() {
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(self.fence_event);
+            }
+        }
     }
 }
 
