@@ -987,6 +987,9 @@ fn create() -> windows::core::Result<Host> {
         // Initialize command pool (Phase 3 Native Graphics).
         let command_pool = crate::host::command_pool::CommandPool::new(&device)?;
         
+        // Initialize barrier tracker (Phase 3 Native Graphics).
+        crate::host::barrier::init_barrier_tracker();
+        
         Ok(Host {
             device,
             queue,
@@ -4181,6 +4184,7 @@ pub(crate) mod upcheck;
 pub(crate) mod command_pool;
 pub(crate) mod descriptor_pool;
 pub(crate) mod binding;
+pub(crate) mod barrier;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
