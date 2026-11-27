@@ -964,8 +964,8 @@ impl NativeMemory {
         binding.heap_offset = offset;
         binding.heap = heap;
 
-        // Track with memory manager (Phase 3 Native Graphics).
-        crate::host::memory_mgr::track_gpu_resource(&resource, size, true);
+        // Track with memory manager (Phase 6 Hardware Optimization).
+        crate::host::memory_mgr::track_gpu_resource(&resource, size, true, crate::host::memory_mgr::MemoryPoolType::Static, crate::host::memory_mgr::ResourcePriority::Normal);
 
         self.gpu_bindings.insert(title_va, binding.clone());
         self.stats.gpu_resources.fetch_add(1, Ordering::Relaxed);
@@ -1565,8 +1565,8 @@ impl NativeMemory {
             title_va, size, resource.clone(), gpu_va, uav, desc, offset, heap
         ));
 
-        // Track with memory manager (Phase 3 Native Graphics).
-        crate::host::memory_mgr::track_gpu_resource(&resource, size, true);
+        // Track with memory manager (Phase 6 Hardware Optimization).
+        crate::host::memory_mgr::track_gpu_resource(&resource, size, true, crate::host::memory_mgr::MemoryPoolType::Static, crate::host::memory_mgr::ResourcePriority::Normal);
 
         self.gpu_bindings.insert(title_va, binding.clone());
         self.stats.gpu_resources.fetch_add(1, Ordering::Relaxed);

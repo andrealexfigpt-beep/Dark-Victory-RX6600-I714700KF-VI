@@ -221,7 +221,7 @@ mod phase4_verification_tests {
 
     #[test]
     fn test_memory_budget_tracking() {
-        use victory_gpu::host::memory_mgr::{memory_stats, track_gpu_resource, untrack_gpu_resource, try_allocate_memory};
+        use victory_gpu::host::memory_mgr::{memory_stats, track_gpu_resource, untrack_gpu_resource, try_allocate_memory, MemoryPoolType, ResourcePriority};
         
         let device = create_test_device();
         
@@ -229,7 +229,7 @@ mod phase4_verification_tests {
         let uav_buffer = create_uav_buffer(&device, 1024 * 1024); // 1 MiB
         
         // Track it
-        track_gpu_resource(&uav_buffer, 1024 * 1024, true);
+        track_gpu_resource(&uav_buffer, 1024 * 1024, true, MemoryPoolType::Static, ResourcePriority::Normal);
         
         // Check stats
         let stats = memory_stats();
