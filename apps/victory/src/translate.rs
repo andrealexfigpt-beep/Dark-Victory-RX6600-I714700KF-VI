@@ -1060,6 +1060,9 @@ pub fn pso_precompile(
             let ps_root = victory_gpu::root::serialize(&ps_shader).map_err(|e| anyhow::anyhow!("Failed to serialize PS root: {}", e))?;
             
             // For simplicity, use the VS root signature (in practice, both should be compatible)
+            let vs_root = victory_gpu::root::serialize(&vs_shader).map_err(|e| anyhow::anyhow!("Failed to serialize VS root: {}", e))?;
+            let ps_root = victory_gpu::root::serialize(&ps_shader).map_err(|e| anyhow::anyhow!("Failed to serialize PS root: {}", e))?;
+            
             let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
                 pRootSignature: unsafe { std::mem::transmute_copy(&vs_root) },
                 VS: D3D12_SHADER_BYTECODE {
@@ -1097,27 +1100,26 @@ pub fn pso_precompile(
                     },
                     ..Default::default()
                 };
-                match unsafe { device.CreateGraphicsPipelineState(&desc) } {
-                    Ok(_) => {
-                        created += 1;
-                        if created % 100 == 0 {
-                            println!("  created {}/{} graphics PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
-                        }
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        if failed <= 10 {
-                            println!("  graphics failed (container {:08x}): {}", 
-                                u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]), e);
-                        }
+            match unsafe { device.CreateGraphicsPipelineState(&desc) } {
+                Ok(_) => {
+                    created += 1;
+                    if created % 100 == 0 {
+                        println!("  created {}/{} graphics PSOs, {:.1}s", created, to_process, started.elapsed().as_secs_f64());
                     }
                 }
-            } else {
-                failed += 1;
-                if failed <= 10 {
-                    println!("  VS without matching PS (container {:08x})", 
-                        u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]));
+                Err(e) => {
+                    failed += 1;
+                    if failed <= 10 {
+                        println!("  graphics failed (container {:08x}): {}", 
+                            u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]), e);
+                    }
                 }
+            }
+        } else {
+            failed += 1;
+            if failed <= 10 {
+                println!("  VS without matching PS (container {:08x})", 
+                    u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]));
             }
         }
     }
@@ -1189,7 +1191,6 @@ pub fn pso_precompile(
                 }
             }
         }
-    }
     
     let elapsed = started.elapsed();
     println!(
