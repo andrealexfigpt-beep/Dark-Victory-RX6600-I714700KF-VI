@@ -263,6 +263,19 @@ pub mod rdna {
     pub const ALL: u32 = 15;
 }
 
+#[cfg(test)]
+mod rdna_tests {
+    use super::rdna;
+    #[test]
+    fn rdna_constants_are_powers_and_all() {
+        assert_eq!(rdna::MAX_MIN, 1);
+        assert_eq!(rdna::LEGACY, 2);
+        assert_eq!(rdna::MED3, 4);
+        assert_eq!(rdna::FRACT, 8);
+        assert_eq!(rdna::ALL, rdna::MAX_MIN | rdna::LEGACY | rdna::MED3 | rdna::FRACT);
+    }
+}
+
 /// A switch's set of bits; `unset` when it is unset or unreadable. Pure, for
 /// testing.
 fn parse_set(value: Option<&str>, unset: u32, all: u32) -> u32 {
