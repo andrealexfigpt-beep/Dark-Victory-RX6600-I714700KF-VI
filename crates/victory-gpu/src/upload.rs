@@ -96,9 +96,8 @@ impl Upload {
         #[cfg(all(windows, feature = "native-memory"))]
         if crate::memory_backend::is_native_backend_active() {
             if let Some(backend) = crate::memory_backend::memory_backend() {
-                // Use native backend's upload ring buffer
-                let ring = backend.upload_ring();
-                let (offset, ptr) = ring.allocate(len as u64, crate::native_mem::UPLOAD_ALIGNMENT)?;
+                // Use native backend's upload ring buffer via trait method
+                let (offset, ptr) = backend.allocate_upload(len as u64, crate::native_mem::UPLOAD_ALIGNMENT)?;
                 return Some(Upload(Kind::NativeRing(offset, ptr, len)));
             }
         }

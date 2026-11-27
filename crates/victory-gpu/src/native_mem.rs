@@ -100,6 +100,12 @@ struct GpuResourceBinding {
     array_size: u16,
     /// Sample count.
     sample_count: u32,
+    /// Texture width (for textures).
+    width: u64,
+    /// Texture height (for textures).
+    height: u32,
+    /// Texture depth or array size (for textures).
+    depth_or_array_size: u16,
     /// Optional upload heap staging resource for CPU->GPU copies.
     upload_staging: Option<ID3D12Resource>,
     /// Optional readback heap staging resource for GPU->CPU copies.
@@ -134,6 +140,9 @@ impl GpuResourceBinding {
             mip_levels: 1,
             array_size: 1,
             sample_count: 1,
+            width: 0,
+            height: 0,
+            depth_or_array_size: 1,
             upload_staging: None,
             readback_staging: None,
             fence_value: 0,
@@ -165,6 +174,9 @@ impl GpuResourceBinding {
             mip_levels: desc.MipLevels,
             array_size: desc.DepthOrArraySize,
             sample_count: desc.SampleDesc.Count,
+            width: desc.Width,
+            height: desc.Height,
+            depth_or_array_size: desc.DepthOrArraySize,
             upload_staging: None,
             readback_staging: None,
             fence_value: 0,
@@ -206,9 +218,9 @@ impl GpuResourceBinding {
                 &D3D12_RESOURCE_DESC {
                     Dimension: self.dimension,
                     Alignment: 0,
-                    Width: self.size,
-                    Height: 1,
-                    DepthOrArraySize: self.array_size,
+                    Width: self.width,
+                    Height: self.height,
+                    DepthOrArraySize: self.depth_or_array_size,
                     MipLevels: self.mip_levels,
                     Format: self.format,
                     SampleDesc: DXGI_SAMPLE_DESC { Count: self.sample_count, Quality: 0 },
@@ -712,14 +724,14 @@ impl NativeMemory {
     }
 
     /// Get or create the upload ring buffer.
-    fn upload_ring(&self) -> &UploadRing {
+    pub fn upload_ring(&self) -> &UploadRing {
         self.upload_ring.get_or_init(|| {
             UploadRing::new(&self.device, UPLOAD_RING_SIZE).expect("Failed to create upload ring")
         })
     }
 
     /// Get or create the readback ring buffer.
-    fn readback_ring(&self) -> &ReadbackRing {
+    pub fn readback_ring(&self) -> &ReadbackRing {
         self.readback_ring.get_or_init(|| {
             ReadbackRing::new(&self.device, READBACK_RING_SIZE).expect("Failed to create readback ring")
         })
@@ -1688,20 +1700,27 @@ impl NativeShadow {
     /// Bring `len` bytes at `address` up to date when `list` is submitted.
     pub fn refresh(&self, list: &crate::list::HostList, address: u64, len: u64) {
         let len = len.min(self.title_va + self.len - address);
-        let _ = self.backend.upload_to_gpu(self.title_va, address - self.title_va, &vec![0u8; len as usize]);
-        // Note: In practice, the data would come from the title's CPU memory
-        // For now, we just ensure the GPU resource exists and is ready
+        // Read data from title CPU memory and upload to GPU
+        let offset = address - self.title_va;
+        let ptr = address as *const u8;
+        let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        let _ = self.backend.upload_to_gpu(self.title_va, offset, data);
     }
 
     /// Shaders of `list` may write `[address, address + len)` of the copy.
     pub fn gpu_writes(&self, list: &crate::list::HostList, address: u64, len: u64) {
         let len = len.min(self.title_va + self.len - address);
-        let _ = self.backend.gpu_writes(address, len);
+        let _ = self.backend.gpu_writes(self.title_va, address - self.title_va, len);
     }
 
     /// Whether the memory behind the copy turned out not to be write-watched.
     pub fn unwatched(&self) -> bool {
         false // Native backend doesn't use write watching
+    }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        unsafe { self.resource.GetDesc() }.Width
     }
 }
 

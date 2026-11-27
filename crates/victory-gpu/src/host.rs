@@ -436,10 +436,18 @@ fn sweep() {
     crate::book::check();
     let headroom = ram_headroom();
     crate::pool::room(host().and_then(|h| h.video_memory()), headroom, now);
-    crate::shadow::trim_snapshots(headroom);
+    #[cfg(all(windows, feature = "native-memory"))]
+    if !crate::memory_backend::is_native_backend_active() {
+        crate::shadow::trim_snapshots(headroom);
+        crate::shadow::let_go_idle(headroom);
+    }
+    #[cfg(not(all(windows, feature = "native-memory")))]
+    {
+        crate::shadow::trim_snapshots(headroom);
+        crate::shadow::let_go_idle(headroom);
+    }
     send::trim_spare(headroom);
     crate::pipeline::trim_library();
-    crate::shadow::let_go_idle(headroom);
     crate::texture::trim_read_scratch(headroom);
     crate::texture::let_go_idle(headroom);
     crate::resource::let_go_idle();
@@ -4704,6 +4712,11 @@ impl Host {
     /// (`crate::picked`).
     fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
         use std::sync::Arc;
+        // Skip legacy card buffers when native backend is active
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            return None;
+        }
         if !crate::shadow::cards() {
             return None;
         }
@@ -6050,7 +6063,13 @@ impl Host {
         let behind = late && flying();
         stage.next("submit: gathering what to ask about");
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
-        // The ranges shaders write are counted for it (with the relay).
+        // Skip legacy shadow system when native backend is active
+        #[cfg(all(windows, feature = "native-memory"))]
+        if !crate::memory_backend::is_native_backend_active() {
+            // The ranges shaders write are counted for it (with the relay).
+            crate::shadow::preparing(this_submission);
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
         crate::shadow::preparing(this_submission);
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
@@ -6135,6 +6154,17 @@ impl Host {
         // The snapshots of the ranges shaders may write, if they were left
         // for now (`crate::shadow::wide_back`): the refreshes are done, the
         // lists have not gone to the card.
+        #[cfg(all(windows, feature = "native-memory"))]
+        if !crate::memory_backend::is_native_backend_active() {
+            {
+                #[cfg(feature = "diagnostics")]
+                let snapshots = std::time::Instant::now();
+                crate::shadow::take_snapshots();
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
+            }
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
         {
             #[cfg(feature = "diagnostics")]
             let snapshots = std::time::Instant::now();
@@ -6156,6 +6186,13 @@ impl Host {
         }
         // What shaders may write through views they pick: last, so that no
         // refresh of this submission leaves it alone.
+        #[cfg(all(windows, feature = "native-memory"))]
+        let picked = if crate::memory_backend::is_native_backend_active() {
+            crate::picked::Ranges::default()
+        } else {
+            crate::picked::declare(runs)
+        };
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let picked = crate::picked::declare(runs);
         for (shadow, at, len) in &picked.written {
             shadow.writing(*at, *len);
@@ -6390,6 +6427,11 @@ impl Host {
         // With the relay: nothing is in the air now, so no fetch still to
         // be merged is older than the sends to card copies so far, and
         // their notes can go.
+        #[cfg(all(windows, feature = "native-memory"))]
+        if relay() && !crate::memory_backend::is_native_backend_active() {
+            crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
         if relay() {
             crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
         }
@@ -9373,7 +9415,16 @@ impl Meter {
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
         );
-        crate::shadow::exact_line(frames);
+        #[cfg(all(windows, feature = "native-memory"))]
+        if !crate::memory_backend::is_native_backend_active() {
+            crate::shadow::exact_line(frames);
+            crate::shadow::back_line(frames);
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        {
+            crate::shadow::exact_line(frames);
+            crate::shadow::back_line(frames);
+        }
         #[cfg(feature = "diagnostics")]
         crate::resource::scene_dimension_line();
         crate::descriptor::sync_line(frames);
@@ -9384,7 +9435,6 @@ impl Meter {
         card_clock_line(frames, ms);
         #[cfg(feature = "diagnostics")]
         spans::line(frames);
-        crate::shadow::back_line(frames);
         #[cfg(feature = "diagnostics")]
         split_line(frames);
         {
@@ -9438,6 +9488,13 @@ impl Meter {
         // Depth planes drawn from their twins.
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
+        #[cfg(all(windows, feature = "native-memory"))]
+        let card = if crate::memory_backend::is_native_backend_active() {
+            [0u64; 10]
+        } else {
+            crate::shadow::card_stats()
+        };
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let card = crate::shadow::card_stats();
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();

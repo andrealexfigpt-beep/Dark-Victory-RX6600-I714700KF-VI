@@ -4158,7 +4158,7 @@ fn make_twinned(
                     device.CreateConstantBufferView(Some(&desc), twin);
                 }
             }
-            Some(Some(shadow.buffer.clone()))
+            Some(Some(shadow.resource().clone()))
         }
         View::Shader(resource, desc) => {
             let resource = *resource as crate::object::This;

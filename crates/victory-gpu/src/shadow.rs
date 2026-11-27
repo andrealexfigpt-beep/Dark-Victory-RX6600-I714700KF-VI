@@ -402,6 +402,10 @@ struct Card {
 /// shaders, as before, and goes back to the title the next time a declared
 /// range holds its piece (before: never).
 pub(crate) fn cards() -> bool {
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_BUFFERS").is_none_or(|v| v != "0"))
 }
@@ -1190,6 +1194,10 @@ mod card_tests {
 ///   ([`card_dirty`]), so that a merge can tell the title's bytes the card
 ///   had not received from bytes the card wrote.
 pub(crate) fn relay() -> bool {
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // On by default (stage 2, `crate::host::relay_exact`); `VICTORY_RELAY=0`
     // turns it off, `=1` asks for the first stage.
@@ -1785,6 +1793,10 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
 /// own copies write title memory and not the copy, and the card runs the
 /// lists only afterwards).
 pub(crate) fn wide_back() -> bool {
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // On by default; `VICTORY_WIDE_BACK=0` turns it off.
     *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_BACK").is_none_or(|v| v != "0"))

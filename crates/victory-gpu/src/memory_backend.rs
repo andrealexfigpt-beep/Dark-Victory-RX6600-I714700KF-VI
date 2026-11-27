@@ -123,6 +123,18 @@ pub trait MemoryBackend: Send + Sync {
     fn copy_back(&self, gpu_va: u64, address: u64, len: u64) -> anyhow::Result<usize> {
         Err(anyhow::anyhow!("Not implemented"))
     }
+
+    /// Allocate space in the upload ring buffer (native backend only).
+    /// Returns (offset, mapped_ptr) for CPU writes.
+    fn allocate_upload(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+        None
+    }
+
+    /// Allocate space in the readback ring buffer (native backend only).
+    /// Returns (offset, mapped_ptr) for CPU reads.
+    fn allocate_readback(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+        None
+    }
 }
 
 /// Legacy backend wrapper (uses existing memory.rs, watch.rs, shadow.rs, upload.rs).
@@ -344,6 +356,14 @@ impl MemoryBackend for NativeBackend {
         build_inputs: &D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS,
     ) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
         self.inner.get_acceleration_structure_prebuild_info(build_inputs)
+    }
+
+    fn allocate_upload(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+        self.inner.upload_ring().allocate(size, alignment)
+    }
+
+    fn allocate_readback(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+        self.inner.readback_ring().allocate(size, alignment)
     }
 }
 
