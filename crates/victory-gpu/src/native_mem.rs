@@ -880,16 +880,32 @@ impl NativeMemory {
 
     /// Free title virtual memory (replaces XMemVirtualFree).
     /// Note: GPU resource lifetime is managed by D3D12 reference counting.
-    /// The heap offset is freed immediately; aliasing safety relies on
-    /// the title's own synchronization (XMemPhysicalPages semantics).
+    /// Free a title VA and its associated GPU resource.
+    /// The resource is queued for deferred destruction to ensure fence-safe lifetime.
     pub fn free(&self, title_va: u64) -> bool {
-        self.gpu_bindings.remove(&title_va);
-        if let Some((_, alloc)) = self.allocations.remove(&title_va) {
-            debug!("Freed title VA {:#x} + {:#x}", alloc.title_va, alloc.size);
-            true
-        } else {
-            false
+        // Remove GPU binding and get the resource for deferred destruction
+        let resource_info = self.gpu_bindings.remove(&title_va).map(|(_, binding)| {
+            let fence_value = binding.fence_value;
+            let resource = binding.resource.clone();
+            let heap = binding.heap.clone();
+            let heap_offset = binding.heap_offset;
+            (fence_value, resource, heap, heap_offset)
+        });
+
+        if let Some((fence_value, resource, heap, heap_offset)) = resource_info {
+            // Queue for deferred destruction after the fence completes
+            if fence_value > 0 {
+                self.queue_deferred_destruction(fence_value, resource, heap, heap_offset);
+            }
+            // If fence_value is 0, the resource was never used for GPU operations
+            // D3D12 refcount will handle cleanup when the last Arc is dropped
         }
+
+        let result = self.allocations.remove(&title_va).is_some();
+        if result {
+            debug!("Freed title VA {:#x}", title_va);
+        }
+        result
     }
 
     /// Create a GPU buffer resource bound to title virtual memory.
