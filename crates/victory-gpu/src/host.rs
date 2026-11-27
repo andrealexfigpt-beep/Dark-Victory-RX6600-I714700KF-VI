@@ -978,6 +978,9 @@ fn create() -> windows::core::Result<Host> {
             .ok();
         tracing::info!("host D3D12 device ready");
         
+        // Initialize descriptor heap pools (Phase 3 Native Graphics).
+        crate::host::descriptor_pool::init_descriptor_pools(&device)?;
+        
         // Initialize command pool (Phase 3 Native Graphics).
         let command_pool = crate::host::command_pool::CommandPool::new(&device)?;
         
@@ -4173,6 +4176,7 @@ mod torn;
 mod traffic;
 pub(crate) mod upcheck;
 pub(crate) mod command_pool;
+pub(crate) mod descriptor_pool;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
