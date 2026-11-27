@@ -34,7 +34,7 @@ jobs:
 
   native-memory:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
@@ -45,3 +45,11 @@ jobs:
         run: cargo test --workspace --features "native-memory,diagnostics" --locked native_mem
       - name: Run all tests with native backend
         run: cargo test --workspace --features "native-memory,diagnostics" --locked
+      - name: Run native memory benchmarks
+        run: cargo test --workspace --features "native-memory,diagnostics" --locked benchmarks -- --nocapture
+      - name: Upload diagnostic executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: victory-gpu-native-memory-diagnostic
+          path: target/debug/victory-gpu*.exe
+          retention-days: 7
