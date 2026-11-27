@@ -18,6 +18,7 @@ mod native_mem_tests {
     use windows::Win32::Graphics::Dxgi::*;
     use windows::Win32::Graphics::Dxgi::Common::*;
 
+    use fastrand;
     use victory_gpu::native_mem::{NativeMemory, PAGE};
     use victory_gpu::host::{host, Host};
 

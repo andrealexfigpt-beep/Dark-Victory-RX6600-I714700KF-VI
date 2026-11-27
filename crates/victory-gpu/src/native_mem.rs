@@ -12,7 +12,7 @@
 //! - No page faults, no write watching, no journal, no ASKING mutex
 //! - CPU/GPU coherence via explicit Map/Unmap + fence ordering (standard D3D12)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
