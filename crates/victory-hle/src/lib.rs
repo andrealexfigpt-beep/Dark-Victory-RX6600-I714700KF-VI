@@ -19,10 +19,16 @@ pub use victory_gpu::frame_phase;
 pub use victory_gpu::shader_perm;
 
 pub mod modules;
+mod native_runtime;
 mod registry;
 pub mod runtime;
 
 pub use host::HostPolicy;
+pub use native_runtime::{
+    initialize_runtime, runtime, is_native_runtime_active, shutdown_runtime,
+    ExecutionMode, RuntimeConfig, HardwareCapabilities, RuntimeProfile,
+    NativeRuntime,
+};
 pub use registry::{HleExport, HleModule, registry};
 pub use victory_gpu::console;
 #[cfg(all(windows, feature = "diagnostics"))]
