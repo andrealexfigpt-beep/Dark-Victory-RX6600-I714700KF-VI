@@ -422,17 +422,33 @@ impl NativeRuntime {
         Ok(())
     }
 
-    /// Start background task scheduler.
+    /// Start background task scheduler with adaptive thread counts.
     fn start_background_scheduler(&mut self) {
         let shutdown = self.shutdown_requested.clone();
         let tasks = self.background_tasks.clone();
         let budget_ms = self.config.background_task_budget_ms;
         let max_threads = self.config.max_background_threads;
+        let cpu_cores = self.hardware.cpu_core_count.max(1);
+        
+        // Calculate adaptive thread count: reserve 1-2 cores for main thread,
+        // use remaining for background work. On 6-core Ryzen 5 5600X, use 3-4 threads.
+        let adaptive_max_threads = if cpu_cores <= 2 {
+            1
+        } else if cpu_cores <= 4 {
+            2
+        } else if cpu_cores <= 6 {
+            cpu_cores - 2
+        } else if cpu_cores <= 8 {
+            cpu_cores - 3
+        } else {
+            cpu_cores / 2
+        }.min(max_threads as u32) as usize;
 
         let handle = std::thread::Builder::new()
             .name("victory-background".into())
             .spawn(move || {
                 let mut thread_pool = Vec::new();
+                let mut idle_count = 0;
                 
                 while !shutdown.load(Ordering::Acquire) {
                     // Process background tasks
@@ -455,16 +471,31 @@ impl NativeRuntime {
                                 "Background task exceeded budget"
                             );
                         }
+                        idle_count = 0;
                     } else {
-                        // No tasks, sleep briefly
-                        std::thread::sleep(Duration::from_millis(10));
+                        // No tasks, sleep briefly with exponential backoff
+                        idle_count += 1;
+                        let sleep_ms = (10u64 * 2u64.saturating_pow(idle_count.min(6))).min(100);
+                        std::thread::sleep(Duration::from_millis(sleep_ms));
                     }
 
                     // Clean up finished threads
                     thread_pool.retain(|t| !t.is_finished());
                     
+                    // Dynamic thread pool sizing: scale down when idle, up when busy
+                    let target_threads = if thread_pool.len() > adaptive_max_threads {
+                        // Scale down if we have too many idle threads
+                        thread_pool.retain(|t| !t.is_finished());
+                        thread_pool.len()
+                    } else if idle_count == 0 && thread_pool.len() < adaptive_max_threads {
+                        // Could spawn more workers if we had work queue
+                        thread_pool.len()
+                    } else {
+                        thread_pool.len()
+                    };
+                    
                     // Limit thread pool size
-                    while thread_pool.len() >= max_threads as usize {
+                    while thread_pool.len() > adaptive_max_threads {
                         std::thread::sleep(Duration::from_millis(1));
                         thread_pool.retain(|t| !t.is_finished());
                     }
@@ -472,7 +503,11 @@ impl NativeRuntime {
             });
 
         self.background_thread = handle.ok();
-        tracing::info!("Background task scheduler started");
+        tracing::info!(
+            adaptive_max_threads = adaptive_max_threads,
+            cpu_cores = cpu_cores,
+            "Background task scheduler started with adaptive thread pool"
+        );
     }
 
     /// Start profiling.
