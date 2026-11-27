@@ -111,6 +111,22 @@ impl ShadowHandle {
             ShadowHandle::Native(s) => s.resource(),
         }
     }
+
+    /// Offset of a title address from the buffer's start (legacy only, for view_home).
+    pub fn offset(&self, address: u64) -> u64 {
+        match self {
+            ShadowHandle::Legacy(s) => s.offset(address),
+            ShadowHandle::Native(_) => 0, // Native backend doesn't use view_home
+        }
+    }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        match self {
+            ShadowHandle::Legacy(s) => s.width(),
+            ShadowHandle::Native(s) => s.width(),
+        }
+    }
 }
 
 #[cfg(all(windows, not(feature = "native-memory")))]
@@ -149,6 +165,16 @@ impl ShadowHandle {
     /// Get the underlying D3D12 resource for descriptor creation.
     pub fn resource(&self) -> &ID3D12Resource {
         &self.0.buffer
+    }
+
+    /// Offset of a title address from the buffer's start (legacy only, for view_home).
+    pub fn offset(&self, address: u64) -> u64 {
+        self.0.offset(address)
+    }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        self.0.width()
     }
 }
 

@@ -9377,6 +9377,11 @@ impl Meter {
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
         self.frames += 1;
+        // Advance memory backend frame counter
+        #[cfg(all(windows, feature = "native-memory"))]
+        if let Some(backend) = crate::memory_backend::memory_backend() {
+            backend.next_frame();
+        }
         #[cfg(feature = "diagnostics")]
         {
             let now = std::time::Instant::now();

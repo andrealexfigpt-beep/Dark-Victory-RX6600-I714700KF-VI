@@ -420,7 +420,7 @@ impl UploadRing {
     }
 
     /// Allocate space in the ring buffer for an upload.
-    /// Returns (offset, mapped_ptr) or None if full.
+    /// Returns (offset, mapped_ptr) or None if full (caller should wait and retry).
     /// Implements fence-safe wraparound: waits for oldest pending allocation
     /// to complete before reusing its space.
     fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
@@ -432,6 +432,8 @@ impl UploadRing {
         if next <= self.size {
             if self.write_offset.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 let ptr = unsafe { self.mapped_ptr.add(current as usize) };
+                // Record this allocation with a placeholder fence value (0 = not yet signaled)
+                self.pending.lock().unwrap().push((current, size, 0));
                 return Some((current, ptr));
             }
         }
@@ -443,7 +445,7 @@ impl UploadRing {
         
         // Remove completed allocations from the front
         while let Some(&(oldest_offset, oldest_size, oldest_fence)) = pending.first() {
-            if completed_fence >= oldest_fence {
+            if oldest_fence == 0 || completed_fence >= oldest_fence {
                 pending.remove(0);
             } else {
                 break;
@@ -455,18 +457,17 @@ impl UploadRing {
         let available_space = self.size - used_space;
         
         if size > available_space {
-            // Not enough space even after cleanup
+            // Not enough space even after cleanup - caller should wait and retry
             return None;
         }
         
-        // Find a free region (simplified: just reset to 0 if we wrapped)
-        // In a full implementation, we'd track free regions more precisely
+        // Find a free region
         if pending.is_empty() {
             // No pending allocations, can reset to beginning
             self.write_offset.store(0, Ordering::Release);
             if self.write_offset.compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 let ptr = unsafe { self.mapped_ptr.add(0) };
-                pending.push((0, size, 0)); // fence_value will be set after signal
+                pending.push((0, size, 0));
                 return Some((0, ptr));
             }
         }
@@ -485,14 +486,17 @@ impl UploadRing {
     }
 
     /// Signal the fence after recording copy commands.
-    /// Updates the fence value for the most recent pending allocation.
+    /// Updates the fence value for all pending allocations that don't have one yet.
     fn signal_fence(&self, queue: &ID3D12CommandQueue) -> u64 {
         let value = self.fence_value.fetch_add(1, Ordering::AcqRel);
         unsafe { queue.Signal(&self.fence, value) }.ok();
         
-        // Update the fence value for the most recent pending allocation
-        if let Some(last) = self.pending.lock().unwrap().last_mut() {
-            last.2 = value;
+        // Update the fence value for all pending allocations that were made since the last signal
+        let mut pending = self.pending.lock().unwrap();
+        for alloc in pending.iter_mut() {
+            if alloc.2 == 0 {
+                alloc.2 = value;
+            }
         }
         
         value
@@ -579,6 +583,7 @@ impl ReadbackRing {
         if next <= self.size {
             if self.read_offset.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 let ptr = unsafe { self.mapped_ptr.add(current as usize) };
+                self.pending.lock().unwrap().push((current, size, 0));
                 return Some((current, ptr));
             }
         }
@@ -590,7 +595,7 @@ impl ReadbackRing {
         
         // Remove completed allocations from the front
         while let Some(&(oldest_offset, oldest_size, oldest_fence)) = pending.first() {
-            if completed_fence >= oldest_fence {
+            if oldest_fence == 0 || completed_fence >= oldest_fence {
                 pending.remove(0);
             } else {
                 break;
@@ -631,8 +636,11 @@ impl ReadbackRing {
         let value = self.fence_value.fetch_add(1, Ordering::AcqRel);
         unsafe { queue.Signal(&self.fence, value) }.ok();
         
-        if let Some(last) = self.pending.lock().unwrap().last_mut() {
-            last.2 = value;
+        let mut pending = self.pending.lock().unwrap();
+        for alloc in pending.iter_mut() {
+            if alloc.2 == 0 {
+                alloc.2 = value;
+            }
         }
         
         value
@@ -949,10 +957,27 @@ impl NativeMemory {
             return Err(anyhow::anyhow!("Upload exceeds resource bounds"));
         }
 
-        // Allocate from upload ring
+        // Allocate from upload ring, waiting if necessary
         let ring = self.upload_ring();
-        let (ring_offset, ring_ptr) = ring.allocate(size, UPLOAD_ALIGNMENT)
-            .ok_or_else(|| anyhow::anyhow!("Upload ring full, need to wait for fence"))?;
+        let (ring_offset, ring_ptr) = loop {
+            if let Some(alloc) = ring.allocate(size, UPLOAD_ALIGNMENT) {
+                break alloc;
+            }
+            // Ring full, wait for oldest pending allocation to complete
+            let fence_value = ring.completed_fence();
+            // Wait for the fence to make progress
+            let pending = ring.pending.lock().unwrap();
+            if let Some((_, _, oldest_fence)) = pending.first() {
+                if *oldest_fence > 0 {
+                    drop(pending);
+                    ring.wait_fence(*oldest_fence);
+                    continue;
+                }
+            }
+            drop(pending);
+            // If no fence to wait on, yield and retry
+            std::thread::yield_now();
+        };
 
         // Copy data to ring buffer
         unsafe {
@@ -1009,10 +1034,23 @@ impl NativeMemory {
             ));
         }
 
-        // Allocate from upload ring
+        // Allocate from upload ring, waiting if necessary
         let ring = self.upload_ring();
-        let (ring_offset, ring_ptr) = ring.allocate(total_bytes, UPLOAD_ALIGNMENT)
-            .ok_or_else(|| anyhow::anyhow!("Upload ring full, need to wait for fence"))?;
+        let (ring_offset, ring_ptr) = loop {
+            if let Some(alloc) = ring.allocate(total_bytes, UPLOAD_ALIGNMENT) {
+                break alloc;
+            }
+            let pending = ring.pending.lock().unwrap();
+            if let Some((_, _, oldest_fence)) = pending.first() {
+                if *oldest_fence > 0 {
+                    drop(pending);
+                    ring.wait_fence(*oldest_fence);
+                    continue;
+                }
+            }
+            drop(pending);
+            std::thread::yield_now();
+        };
 
         // Copy data to ring buffer with proper row/slice pitch handling
         unsafe {
@@ -1105,10 +1143,23 @@ impl NativeMemory {
         }
         total_upload_size = total_upload_size.next_multiple_of(UPLOAD_ALIGNMENT);
 
-        // Allocate from upload ring
+        // Allocate from upload ring, waiting if necessary
         let ring = self.upload_ring();
-        let (ring_offset, ring_ptr) = ring.allocate(total_upload_size, UPLOAD_ALIGNMENT)
-            .ok_or_else(|| anyhow::anyhow!("Upload ring full, need to wait for fence"))?;
+        let (ring_offset, ring_ptr) = loop {
+            if let Some(alloc) = ring.allocate(total_upload_size, UPLOAD_ALIGNMENT) {
+                break alloc;
+            }
+            let pending = ring.pending.lock().unwrap();
+            if let Some((_, _, oldest_fence)) = pending.first() {
+                if *oldest_fence > 0 {
+                    drop(pending);
+                    ring.wait_fence(*oldest_fence);
+                    continue;
+                }
+            }
+            drop(pending);
+            std::thread::yield_now();
+        };
 
         let copy_queue = &self.copy_queue;
         let mut current_ring_offset = ring_offset;
@@ -1179,10 +1230,23 @@ impl NativeMemory {
             return Err(anyhow::anyhow!("Readback exceeds resource bounds"));
         }
 
-        // Allocate from readback ring
+        // Allocate from readback ring, waiting if necessary
         let ring = self.readback_ring();
-        let (ring_offset, ring_ptr) = ring.allocate(size, UPLOAD_ALIGNMENT)
-            .ok_or_else(|| anyhow::anyhow!("Readback ring full"))?;
+        let (ring_offset, ring_ptr) = loop {
+            if let Some(alloc) = ring.allocate(size, UPLOAD_ALIGNMENT) {
+                break alloc;
+            }
+            let pending = ring.pending.lock().unwrap();
+            if let Some((_, _, oldest_fence)) = pending.first() {
+                if *oldest_fence > 0 {
+                    drop(pending);
+                    ring.wait_fence(*oldest_fence);
+                    continue;
+                }
+            }
+            drop(pending);
+            std::thread::yield_now();
+        };
 
         // Record copy command
         let copy_queue = &self.copy_queue;
