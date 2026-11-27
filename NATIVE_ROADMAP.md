@@ -1,155 +1,131 @@
-# Native Graphics Roadmap — Phase 3 Implementation Status
+# Native Platform Roadmap — Phase 4 Implementation Status
 
-Branch: `native-graphics-v1` (based on `native-shaders-v1`)
+Branch: `native-platform-v1` (based on `native-graphics-v1`)
 
-## ✅ Phase 3 Implemented & Committed
+## ✅ Phase 4 Implemented & Committed
 
-### Command Allocator Pool (`host/command_pool.rs`)
-- `CommandPool` with separate pools for DIRECT (graphics), COPY, COMPUTE queues
-- `PooledAllocatorHandle` for allocator reuse after GPU completion
-- Fence-based tracking: allocators returned to pool only after fence signals
-- Statistics: created vs reused counts per queue type
-- Integrated into `Host::new_list()` and `Host::make_list()`
+### XAudio2 Native Windows Fast Path (`modules/xaudio2.rs`)
+- **XAudio2Create** / **XAudio2CreateWithVersionInfo** — factory functions forwarding to host XAudio2
+- **X3DAudioInitialize** / **X3DAudioCalculate** — 3D audio positioning
+- **XMAudioInitialize** / **XMAudioCalculate** — Xbox-specific 3D audio (aliases)
+- **CreateFX** — audio effects creation (returns E_NOTIMPL for now)
+- Thin wrapper around host's `IXAudio2`, `IXAudio2SourceVoice`, `IXAudio2SubmixVoice`, `IXAudio2MasteringVoice`
+- Console XMA audio goes through existing `audio::XMA` decoder (APU/SHAPE)
+- Registered for `xaudio2.dll`, `xaudio2_9.dll`, `xaudio2_8.dll`, `xaudio2_7.dll`
 
-### Persistent Descriptor Heap Management (`host/descriptor_pool.rs`)
-- `DescriptorHeapPool` per heap type: CBV/SRV/UAV (1M/heap), Sampler (64K/heap), RTV/DSV (4K/heap)
-- Free block tracking with coalescing on free
-- Shader-visible heaps for CBV/SRV/UAV and Sampler; non-visible for RTV/DSV
-- `allocate_*/free_*` helpers for each type
-- Statistics: heaps created, allocations, deallocations, peak usage
+### Async File I/O & I/O Completion Ports (`modules/files.rs`)
+- **ReadFileEx** / **WriteFileEx** — async I/O with completion routines
+- **GetOverlappedResult** / **GetOverlappedResultEx** — retrieve async results
+- **CancelIo** / **CancelIoEx** — cancel pending I/O
+- **CreateIoCompletionPort** — associate files with completion ports
+- **GetQueuedCompletionStatus** / **GetQueuedCompletionStatusEx** — dequeue completions
+- **PostQueuedCompletionStatus** — manual completion posting
+- Added to `files` module exports
 
-### Direct Resource Binding Optimizer (`host/binding.rs`)
-- `BindingConfig` with `prefer_direct`, `enable_bounds_check`, `max_table_descriptors`
-- Native default: `prefer_direct=true`, `enable_bounds_check=false`
-- Compatibility mode: `prefer_direct=false`, `enable_bounds_check=true`
-- `ResourceBinding` enum: `DirectRootDescriptor`, `DescriptorTable`, `StaticSampler`
-- `BoundedResourceRegistry` for tracking resources with known bounds
-- `can_use_direct_binding()` checks registry + config
-- Integrated into `bounded_root_srvs()` for pipeline creation
+### Thread Scheduling & Synchronization Primitives (`modules/kernel.rs`)
+| API | Description |
+|-----|-------------|
+| **SetThreadPriority** / **GetThreadPriority** | Thread priority (with `title_priority` mapping) |
+| **SetThreadPriorityBoost** / **GetThreadPriorityBoost** | Priority boost control |
+| **SetProcessPriorityBoost** / **GetProcessPriorityBoost** | Process priority boost |
+| **SetThreadIdealProcessor** / **GetThreadIdealProcessorEx** | Ideal processor |
+| **SetThreadAffinityMask** / **GetProcessAffinityMask** | CPU affinity |
+| **SwitchToThread** | Yield to another thread |
+| **Sleep** / **SleepEx** | Sleep (alertable) |
+| **CreateEventA/W/ExA/ExW** | Event objects |
+| **SetEvent** / **ResetEvent** / **PulseEvent** | Event manipulation |
+| **WaitForSingleObject/Ex** / **WaitForMultipleObjects/Ex** | Wait primitives |
+| **CreateMutexA/W/ExA/ExW** / **ReleaseMutex** | Mutexes |
+| **CreateSemaphoreA/W/ExA/ExW** / **ReleaseSemaphore** | Semaphores |
+| **CreateWaitableTimerA/W/ExA/ExW** | Timers |
+| **SetWaitableTimer/Ex** / **CancelWaitableTimer** | Timer control |
 
-### Redundant Resource Barrier Elimination (`host/barrier.rs`)
-- `BarrierTracker` with per-resource state tracking (global + per-subresource)
-- `ResourceState` enum matching D3D12_RESOURCE_STATES
-- `emit_barriers(required)` only emits transitions when state actually changes
-- Statistics: barriers emitted, barriers eliminated, state transitions, unknown resources
-- Cleanup of old entries after submission threshold
+### High-Resolution Timers & Performance Counters (`modules/kernel.rs`)
+- **QueryPerformanceCounter** / **QueryPerformanceFrequency** — nanosecond-resolution timer
+- **GetTickCount** / **GetTickCount64** — system tick count
+- **timeGetTime** / **timeBeginPeriod** / **timeEndPeriod** — multimedia timer
 
-### Async Queue Manager (`host/queue.rs`)
-- `QueueManager` with Graphics, Compute (if supported), Copy queues
-- Separate fences per queue for independent progress
-- Cross-queue synchronization: `signal_and_wait(signal_queue, wait_queue)`
-- Timeline semaphore support detection (D3D12_FEATURE_D3D12_OPTIONS7)
-- Statistics: submissions per queue type, cross-queue syncs, fence waits
+### Virtual Memory Management (`modules/kernel.rs`)
+- **VirtualAlloc** / **VirtualAllocEx** — reserve/commit memory
+- **VirtualFree** / **VirtualFreeEx** — release/decommit memory
+- **VirtualProtect** / **VirtualProtectEx** — change page protection
+- **VirtualQuery** / **VirtualQueryEx** — query memory info
+- **GetProcessWorkingSetSize/Ex** / **SetProcessWorkingSetSize/Ex** — working set control
+- **FlushProcessWriteBuffers** / **GetWriteWatch** / **ResetWriteWatch** — write tracking
+- **GetLargePageMinimum** — large page support
 
-### Budget-Aware VRAM/Shared Memory Manager (`host/memory_mgr.rs`)
-- `MemoryBudget` config: budgets, target ratios (85% VRAM, 90% shared), reserves
-- Automatic budget query from DXGI adapter (local/non-local segments)
-- `TrackedGpuResource` with size, VRAM/shared classification, LRU tracking
-- `evict_lru()` evicts least-recently-used non-persistent resources
-- `try_allocate()` checks budget before allocation, triggers eviction
-- Periodic `update_budgets()` from adapter
-- Statistics: usage, budget, evictions, evicted bytes, allocation failures
+### System Resource Queries (`modules/kernel.rs`)
+- **GetSystemInfo** / **GetNativeSystemInfo** — system information
+- **GetSystemTimeAsFileTime** / **GetSystemTimePreciseAsFileTime** — system time
+- **GetLocalTime** / **GetSystemTime** / **SetLocalTime** / **SetSystemTime** — time
+- **GetSystemTimeAdjustment** / **SetSystemTimeAdjustment** — time adjustment
+- **IsProcessorFeaturePresent** — CPU feature detection
+- **GetLogicalProcessorInformation/Ex** — CPU topology
+- **GetNumaHighestNodeNumber** / **GetNumaNodeProcessorMaskEx** — NUMA topology
+- **GetNumaProcessorNodeEx** / **GetNumaAvailableMemoryNodeEx** — NUMA memory
 
-### Integration with Native Memory (`native_mem.rs`)
-- `create_gpu_resource()` and `create_gpu_texture()` now call `track_gpu_resource()`
-- `free()` calls `untrack_gpu_resource()` before deferred destruction
-- Resources tracked with VRAM classification for budget management
-
-### Native Shaders Integration
-- Permutation tracking already integrated in Phase 2 (`shader_perm.rs`)
-- `record_translation()` at shader translation time
-- `record_pipeline_shader()` + `mark_pso_created()` at PSO creation
-- Translation fingerprint includes all Phase 3 settings (binding config, RDNA, wave)
+### Phase 4 Verification Tests (`tests/phase4_verification_test.rs`)
+| Test | Description |
+|------|-------------|
+| `test_descriptor_heap_limits_cbv_srv_uav` | 10K descriptor allocations, reuse after free |
+| `test_descriptor_heap_limits_sampler` | Sampler heap allocations |
+| `test_descriptor_heap_limits_rtv_dsv` | RTV/DSV heap (non-shader-visible) |
+| `test_descriptor_pool_stats` | Statistics tracking |
+| `test_command_allocator_pool_reuse` | Fence-based allocator return-to-pool |
+| `test_barrier_tracker_eliminates_redundant` | Redundant barrier elimination |
+| `test_cross_queue_synchronization` | Cross-queue fence signaling/waiting |
+| `test_async_compute_queue_creation` | Queue manager with async compute |
+| `test_memory_budget_tracking` | VRAM budget tracking and eviction |
 
 ## 📋 Regression Tests Added
 
-### Command Pool Tests (`host/command_pool.rs`)
-- `test_command_pool_creation` — verifies pool creation, allocator/list retrieval
+### Phase 3 Components (from native-graphics-v1)
+- `host::command_pool::test_command_pool_creation`
+- `host::descriptor_pool::test_descriptor_pool_basic`
+- `host::binding::test_binding_config_defaults` + `test_resource_binding_enum`
+- `host::barrier::test_resource_state_conversion` + `test_barrier_tracker_basic`
+- `host::queue::test_queue_type_enum` + `test_queue_stats_default`
+- `host::memory_mgr::test_memory_budget_default` + `test_memory_stats_default`
 
-### Descriptor Pool Tests (`host/descriptor_pool.rs`)
-- `test_descriptor_pool_basic` — allocation, reallocation after free, heap properties
-
-### Binding Tests (`host/binding.rs`)
-- `test_binding_config_defaults` — native vs compatibility config
-- `test_resource_binding_enum` — enum variants
-
-### Barrier Tests (`host/barrier.rs`)
-- `test_resource_state_conversion` — all ResourceState → D3D12 mapping
-- `test_barrier_tracker_basic` — tracker creation, submission, stats
-
-### Queue Tests (`host/queue.rs`)
-- `test_queue_type_enum` — QueueType values
-- `test_queue_stats_default` — stats initialization
-
-### Memory Manager Tests (`host/memory_mgr.rs`)
-- `test_memory_budget_default` — default budget values
-- `test_memory_stats_default` — stats initialization
-
-### Synthetic Rendering Tests (`tests/synthetic_rendering_test.rs`)
-| Test | Description | GPU Readback |
-|------|-------------|--------------|
-| `test_lighting_stability_across_frames` | Permutation tracker determinism across 5 frames | No (tracker API) |
-| `test_shadow_depth_comparison` | R32_FLOAT depth texture, DEPTH_WRITE→COPY_SOURCE→readback→DEPTH_WRITE | **Yes** (256×256) |
-| `test_reflection_sampling_bindings` | 6-face cubemap 512×512 R16G16B16A16_FLOAT + UAV | No (descriptor verification) |
-| `test_wave32_wave64_equivalence` | Translation fingerprint determinism, includes wave settings | No |
-| `test_rdna_float_on_off` | `TEST_RDNA` thread-local toggle, fingerprint differs, all 4 bits validated | No |
-| `test_cpu_gpu_resource_coherence` | Upload `i ^ 0xDEADBEEF` pattern → copy → readback → assert 256K u32 exact match | **Yes** (1 MiB) |
-| `test_pso_precompile_and_cache` | Real `Host::pipeline()` with `stub_vs()`/`stub_ps()`, permutation tracking | No |
-| `test_resource_transition_barriers` | Full chain: UNORDERED_ACCESS→COPY_SOURCE→COPY_DEST→GENERIC_READ on copy queue | No (device removal check) |
-
-### Benchmarks (`benches/shaders_bench.rs`)
-- `cold_translation` — first-time shader→pipeline latency (100 iters)
-- `warm_translation` — cached shader→pipeline latency (1000 iters)
-- `permutation_deduplication` — 50 unique + 20 duplicates each
-- `pso_creation` — first run vs second run with persistent cache
-- `cache_hit_rate` — working sets 10/50/100/200, 80/20 hit/miss pattern
-- `cpu_overhead` — avg pipeline creation cost
-- `ram_consumption` — 1000 pipelines, estimated metadata RAM
+### Phase 4 Components (new)
+- `tests/phase4_verification_test.rs`: 9 verification tests
 
 ## ⏳ Incomplete / Unverified (Windows CI Required)
 
 ### CI Validation Pending
 | Item | Status | Notes |
 |------|--------|-------|
-| Windows CI compilation | **Not yet run** | Pushed to native-graphics-v1; CI triggered |
+| Windows CI compilation | **Not yet run** | Pushed to native-platform-v1; CI triggered |
 | Windows CI test execution | **Not yet run** | Requires `native-memory` feature + GPU runner |
 | Actual benchmark measurements | **Not yet run** | `cargo bench -p victory-gpu --features native-memory` on Windows |
-| PSO library persistence across process restart | **Unverified** | Tests use in-memory cache; full persistence needs process restart test |
-| Offline manifest import → PSO precompile end-to-end | **Unverified** | CLI commands wired; manifest format validated; runtime reuse untested |
-| RDNA_FLOAT on/off rendering comparison | **Unverified** | Unit test verifies fingerprint change; pixel-equivalence needs GPU |
-| Wave32/64 translated shader equivalence | **Unverified** | Fingerprint test only; actual shader diff needs DXIL compare |
-| Async compute queue creation | **Unverified** | Depends on D3D12_FEATURE_D3D12_OPTIONS support |
-| Timeline semaphore cross-queue sync | **Unverified** | Requires SM 6.6 support |
-| Memory budget eviction under pressure | **Unverified** | Requires sustained GPU memory pressure |
+| XAudio2 end-to-end audio playback | **Unverified** | Requires audio hardware + title using XAudio2 |
+| Async I/O completion port stress | **Unverified** | Requires title using IOCP |
+| Timer resolution changes | **Unverified** | Requires `timeBeginPeriod` usage |
+| Virtual memory pressure tests | **Unverified** | Requires sustained allocation pressure |
+| NUMA topology on multi-socket | **Unverified** | Requires multi-socket hardware |
 
 ### Known Gaps
-1. **No Windows hardware in this sandbox** — cannot run D3D12 tests locally
+1. **No Windows hardware in this sandbox** — cannot run D3D12/XAudio2 tests locally
 2. **GitHub Actions Windows runners** — only validation path; may lack GPU for full render tests
-3. **`victory-shader::emit::host::stub_vs/stub_ps`** — minimal shaders; real Xbox shader translation not exercised in tests
-4. **Permutation tracker import path** — `import_permutations()` exists but not stress-tested with large manifests
-5. **PSO library eviction/trim** — not benchmarked; VRAM bounds via `--limit` not fully implemented
-6. **Cross-lane operation detection** — `cross_lane` field in key always `false` (needs IR analysis)
-7. **Descriptor pool exhaustion** — no test for allocation failure when heap full
-8. **Barrier tracker cross-submission state** — state persists across submissions but cleanup threshold not tuned
+3. **XAudio2 CreateFX** — returns E_NOTIMPL; effect support not implemented
+4. **X3DAudio** — structures defined but calculation forwards to host (zeroed output)
+5. **VirtualAllocEx** — forwards to host but process handle validation minimal
+6. **System resource queries** — some return host values; may not match console expectations
 
 ## 📋 Next Steps (Post-CI)
 
-1. **Monitor Windows CI** — fix any compilation errors in `victory-gpu` (windows-sys, feature gating)
-2. **If CI passes:** Run benchmarks manually on Windows hardware with RX 6600 XT
+1. **Monitor Windows CI** — fix any compilation errors in `victory-hle` / `victory-gpu`
+2. **If CI passes:** Run Phase 4 verification tests on RX 6600 XT hardware
 3. **Add missing test coverage:**
-   - Large manifest import (10K+ permutations)
-   - Process-restart PSO library reuse
-   - Real Xbox shader container translation (not stubs)
-   - Wave32/64 DXIL diff validation
-   - Descriptor pool stress test (exhaustion, fragmentation)
-   - Barrier tracker with real draw/dispatch workloads
-   - Async compute queue with actual compute shaders
-   - Memory manager under sustained pressure
+   - XAudio2 source/submix/mastering voice creation
+   - IOCP with multiple concurrent async operations
+   - Timer queue with `CreateTimerQueueTimer`
+   - Virtual memory allocation/deallocation patterns
+   - NUMA-aware memory allocation
 4. **Optimize based on measurements:**
-   - If cold translation >100ms: investigate parallelization
-   - If cache hit rate <90%: tune permutation key
-   - If RAM >500MB: add LRU eviction to tracker
+   - If descriptor pool fragmentation >10%: improve coalescing
    - If barrier elimination <50%: expand state tracking
+   - If memory eviction latency >1ms: optimize LRU selection
 5. **Document measured results** in this file
 
 ## Commands to Run on Windows
@@ -158,16 +134,22 @@ Branch: `native-graphics-v1` (based on `native-shaders-v1`)
 # Build with native memory backend
 cargo build -p victory --features native-memory
 
-# Run synthetic rendering tests
+# Run Phase 3 synthetic rendering tests
 cargo test -p victory-gpu --features native-memory synthetic_rendering
 
-# Run unit tests for Phase 3 components
+# Run Phase 4 verification tests
+cargo test -p victory-gpu --features native-memory phase4_verification
+
+# Run unit tests for Phase 3/4 components
 cargo test -p victory-gpu --features native-memory host::command_pool
 cargo test -p victory-gpu --features native-memory host::descriptor_pool
 cargo test -p victory-gpu --features native-memory host::binding
 cargo test -p victory-gpu --features native-memory host::barrier
 cargo test -p victory-gpu --features native-memory host::queue
 cargo test -p victory-gpu --features native-memory host::memory_mgr
+cargo test -p victory-hle --features native-memory kernel
+cargo test -p victory-hle --features native-memory files
+cargo test -p victory-hle --features native-memory xaudio2
 
 # Run benchmarks (requires GPU)
 cargo bench -p victory-gpu --features native-memory
@@ -179,5 +161,5 @@ victory shaders pso-precompile --manifest cache/permutations.json --limit 1000
 
 ---
 
-**Last updated:** 2026-11-27 (commit 2a7759c)
-**CI:** Check GitHub Actions for native-graphics-v1 branch
+**Last updated:** 2026-11-27 (commit f4485fc)
+**CI:** Check GitHub Actions for native-platform-v1 branch
