@@ -739,6 +739,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "dashmap",
+ "fastrand",
  "tempfile",
  "tracing",
  "victory-formats",

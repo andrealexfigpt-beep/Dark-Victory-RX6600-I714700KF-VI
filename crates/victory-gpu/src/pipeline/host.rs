@@ -655,7 +655,7 @@ impl HostPipeline {
                     let container = &shader.container;
                     let tf = victory_shader::emit::translation_fingerprint();
                     let rs_hash = compute_root_signature_hash(&translated.host);
-                    let perm_key = victory_shader::emit::HwStage::from(shader.stage.as_str());
+                    let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
                     use blake3::Hasher;
                     let container_hash = blake3::hash(container).as_bytes().clone();
                     let key = crate::shader_perm::ShaderPermutationKey::from_shader(
@@ -847,7 +847,7 @@ impl HostPipeline {
                 let container = &shader.container;
                 let tf = victory_shader::emit::translation_fingerprint();
                 let rs_hash = compute_root_signature_hash(&translated.host);
-                let perm_key = victory_shader::emit::HwStage::from(shader.stage.as_str());
+                let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
                 use blake3::Hasher;
                 let container_hash = blake3::hash(container).as_bytes().clone();
                 let key = crate::shader_perm::ShaderPermutationKey::from_shader(

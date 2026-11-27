@@ -258,7 +258,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
 /// Compute a hash of the root signature description that would be created
 /// from a translated shader. This is used for permutation deduplication.
 #[cfg(windows)]
-fn compute_root_signature_hash(host: &victory_shader::emit::HostShader) -> [u8; 32] {
+pub(crate) fn compute_root_signature_hash(host: &victory_shader::emit::HostShader) -> [u8; 32] {
     use blake3::Hasher;
     let mut h = Hasher::new();
     h.update(&[host.stage as u8]);
