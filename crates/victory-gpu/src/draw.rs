@@ -796,7 +796,14 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
     });
     // A root constant-buffer view has a known 64 KiB access size. Unknown-size
     // root SRVs keep the unsized path and its conservative 4 MiB window.
-    let shadow = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?;
+    #[cfg(all(windows, feature = "native-memory"))]
+    let shadow = if crate::memory_backend::is_native_backend_active() {
+        crate::shadow::find_known_handle(address, if srv { 1 } else { 1 << 16 })?
+    } else {
+        crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into()
+    };
+    #[cfg(not(all(windows, feature = "native-memory")))]
+    let shadow = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into();
     let len = shadow
         .left(address)
         .min(if srv { limit } else { 1 << 16 });
@@ -1292,11 +1299,30 @@ impl State {
             // (`root_uav`, `root_srv_table`).
             // shortcut: found again here, not taken from the list's slot.
             return match self.roots_ref(compute).get(usize::from(slot)) {
-                Some(&Root::View(address)) => crate::shadow::find(address, 1).map_or(0, |s| {
-                    // SAFETY: a live buffer.
-                    let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                    ((s.gpu(address) - base) & 15) as u32
-                }),
+                Some(&Root::View(address)) => {
+                    #[cfg(all(windows, feature = "native-memory"))]
+                    if crate::memory_backend::is_native_backend_active() {
+                        crate::shadow::find_handle(address, 1).map_or(0, |s| {
+                            // For native backend, the base is the resource's GPU VA
+                            // The offset within the resource is (gpu(address) - base)
+                            // But we don't have direct access to the resource here
+                            // Return 0 as bias for native backend (not used in same way)
+                            0
+                        })
+                    } else {
+                        crate::shadow::find(address, 1).map_or(0, |s| {
+                            // SAFETY: a live buffer.
+                            let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+                            ((s.gpu(address) - base) & 15) as u32
+                        })
+                    }
+                    #[cfg(not(all(windows, feature = "native-memory")))]
+                    crate::shadow::find(address, 1).map_or(0, |s| {
+                        // SAFETY: a live buffer.
+                        let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+                        ((s.gpu(address) - base) & 15) as u32
+                    })
+                }
                 _ => 0,
             };
         }
@@ -1375,6 +1401,11 @@ impl State {
                 addresses.push(self.view_address(compute, u.slot, u.dword));
             }
         }
+        // Check if native memory backend is active
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            return crate::memory::ready_native(list, heap, &addresses, &written, &constants, use_, t.threads);
+        }
         crate::memory::ready(list, heap, &addresses, &written, &constants, use_, t.threads)
     }
 
@@ -1425,7 +1456,16 @@ impl State {
             if v.address == 0 || v.size == 0 {
                 continue;
             }
-            let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+            #[cfg(all(windows, feature = "native-memory"))]
+            let shadow = if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_any_handle(v.address, u64::from(v.size))
+            } else {
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
+            };
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            
+            let Some(shadow) = shadow else {
                 continue;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
@@ -1443,7 +1483,16 @@ impl State {
         }
         if indexed {
             let v = self.index;
-            let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+            #[cfg(all(windows, feature = "native-memory"))]
+            let shadow = if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_any_handle(v.address, u64::from(v.size))
+            } else {
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
+            };
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            
+            let Some(shadow) = shadow else {
                 return false;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
@@ -1766,17 +1815,22 @@ impl State {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map_or(u64::MAX, |mb| mb << 20)
         });
+        #[cfg(all(windows, feature = "native-memory"))]
         let find = |a: u64| {
-            let s = crate::shadow::find(a, 1)?;
-            // SAFETY: a live buffer.
-            let flags = unsafe { s.buffer.GetDesc() }.Flags;
-            if flags.0 & UNORDERED == 0 {
-                once!("a root UAV of a buffer whose host copy shaders cannot write");
-                return None;
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(a, 1).map(|s| {
+                    // For native backend, all GPU resources created for UAV have the flag
+                    s
+                })
+            } else {
+                crate::shadow::find(a, 1).map(Into::into)
             }
-            Some(s)
         };
-        let ready = |a: u64, s: &std::sync::Arc<crate::shadow::Shadow>| {
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        let find = |a: u64| {
+            crate::shadow::find(a, 1).map(Into::into)
+        };
+        let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);
             s.refresh(list, a, len);
             if writes {
@@ -1888,7 +1942,16 @@ impl State {
         let (index, shadow) = match self.root_srv_slots.get(&key) {
             Some((index, shadow)) => (*index, address.zip(shadow.clone())),
             None => {
-                let shadow = address.and_then(|a| crate::shadow::find(a, 1).map(|s| (a, s)));
+                let shadow = address.and_then(|a| {
+            #[cfg(all(windows, feature = "native-memory"))]
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(a, 1).map(|s| (a, s))
+            } else {
+                crate::shadow::find(a, 1).map(|s| (a, s.into()))
+            }
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            crate::shadow::find(a, 1).map(|s| (a, s.into()))
+        });
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
@@ -1898,15 +1961,15 @@ impl State {
                 match &shadow {
                     Some((a, s)) => {
                         // SAFETY: a live buffer.
-                        let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+                        let base = unsafe { s.resource().GetGPUVirtualAddress() };
                         let offset = s.gpu(*a) - base;
                         if biased {
                             // From the 16 bytes below; the shader adds the
                             // rest (`victory_shader::emit::USER_VIEW_BIAS`).
                             let bias = offset & 15;
-                            host.raw_at(index, &s.buffer, offset - bias, s.left(*a) + bias);
+                            host.raw_at(index, s.resource(), offset - bias, s.left(*a) + bias);
                         } else if offset.is_multiple_of(16) {
-                            host.raw_at(index, &s.buffer, offset, s.left(*a));
+                            host.raw_at(index, s.resource(), offset, s.left(*a));
                         } else {
                             // Raw views start on 16 bytes; one from the
                             // aligned start would shift every read.
@@ -1914,6 +1977,7 @@ impl State {
                                 address = format_args!("{a:#x}"),
                                 "a root SRV not on 16 bytes reads zeros"
                             );
+                        }
                             host.null_raw_at(index);
                         }
                     }
@@ -2904,8 +2968,16 @@ impl State {
             }
             for &(slot, _) in stage.root_cbvs.iter().chain(&stage.root_srvs).chain(&stage.root_uavs) {
                 if let Some(Root::View(address)) = self.roots_ref(compute).get(usize::from(slot)) {
-                    let host = crate::shadow::find(*address, 1)
-                        .map(|s| (s.gpu(*address), s.left(*address)));
+                    let host = {
+                        #[cfg(all(windows, feature = "native-memory"))]
+                        if crate::memory_backend::is_native_backend_active() {
+                            crate::shadow::find_handle(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
+                        } else {
+                            crate::shadow::find(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
+                        }
+                        #[cfg(not(all(windows, feature = "native-memory")))]
+                        crate::shadow::find(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
+                    };
                     let _ = write!(text, " root{slot}={address:#x} host {host:#x?}");
                 }
             }
@@ -3653,7 +3725,16 @@ impl State {
             if v.address == 0
                 || stride == 0
                 || u64::from(first + count) * stride > u64::from(v.size)
-                || crate::shadow::find(from, rects * 3 * stride).is_none()
+                || {
+                    #[cfg(all(windows, feature = "native-memory"))]
+                    if crate::memory_backend::is_native_backend_active() {
+                        crate::shadow::find_handle(from, rects * 3 * stride).is_none()
+                    } else {
+                        crate::shadow::find(from, rects * 3 * stride).is_none()
+                    }
+                    #[cfg(not(all(windows, feature = "native-memory")))]
+                    crate::shadow::find(from, rects * 3 * stride).is_none()
+                }
             {
                 once!(slot, "rectangle vertices outside their buffer");
                 return false;

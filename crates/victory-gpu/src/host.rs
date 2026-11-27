@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
@@ -822,7 +822,18 @@ pub(crate) fn made_host() -> Option<&'static Host> {
 /// behaves as before: nothing executes).
 pub(crate) fn host() -> Option<&'static Host> {
     HOST.get_or_init(|| match create() {
-        Ok(host) => Some(host),
+        Ok(host) => {
+            // Initialize memory backend after host is created
+            #[cfg(all(windows, feature = "native-memory"))]
+            {
+                let device = Arc::new(host.device.clone());
+                let copy_queue = host.copy_queue();
+                if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
+                    tracing::warn!(error = %e, "failed to initialize memory backend");
+                }
+            }
+            Some(host)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "no host D3D12 device; command lists will not run");
             None
@@ -9015,6 +9026,25 @@ impl Host {
     /// given memory ahead of the list that uploads them).
     pub(crate) fn queue(&self) -> &ID3D12CommandQueue {
         &self.queue
+    }
+
+    /// Get the copy queue for async copy operations (upload/readback).
+    /// Creates it on first use if needed.
+    pub(crate) fn copy_queue(&self) -> Arc<ID3D12CommandQueue> {
+        static COPY_QUEUE: OnceLock<Arc<ID3D12CommandQueue>> = OnceLock::new();
+        COPY_QUEUE.get_or_init(|| {
+            let device = &self.device;
+            let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+                Type: D3D12_COMMAND_LIST_TYPE_COPY,
+                Priority: 0,
+                Flags: D3D12_COMMAND_QUEUE_FLAGS(0),
+                NodeMask: 0,
+            };
+            // SAFETY: plain D3D12 object creation.
+            let queue = unsafe { device.CreateCommandQueue(&queue_desc) }
+                .expect("Failed to create copy queue");
+            Arc::new(queue)
+        }).clone()
     }
 
     /// A buffer in the upload heap, mapped for writing.

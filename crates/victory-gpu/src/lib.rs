@@ -137,11 +137,11 @@ pub use watch::{
 #[cfg(all(windows, feature = "native-memory"))]
 pub use native_mem::{
     NativeMemory, init_native_memory, native_memory, is_native_memory_active,
-    PAGE as NATIVE_PAGE, MAX_TITLE_PAGES as NATIVE_MAX_TITLE_PAGES,
+    NativeShadow, PAGE as NATIVE_PAGE, MAX_TITLE_PAGES as NATIVE_MAX_TITLE_PAGES,
 };
 
 /// Memory backend abstraction (legacy vs native).
 #[cfg(windows)]
 pub mod memory_backend;
 #[cfg(windows)]
-pub use memory_backend::{MemoryBackend, init_memory_backend, memory_backend, is_native_backend_active};
+pub use memory_backend::{MemoryBackend, init_memory_backend, init_memory_backend_auto, memory_backend, is_native_backend_active};

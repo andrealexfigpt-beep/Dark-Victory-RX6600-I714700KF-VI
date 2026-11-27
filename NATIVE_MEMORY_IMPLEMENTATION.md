@@ -190,21 +190,53 @@ The `victory-gpu` crate is gated behind `#[cfg(windows)]` and depends on:
 
 **Cannot compile on Linux** - requires Windows target or cross-compilation.
 
+### Native Windows Build (Recommended)
+```bash
+# Prerequisites on Windows:
+# - Visual Studio 2022 with "Desktop development with C++" workload
+# - Windows 10 SDK (10.0.19041.0 or later)
+# - Rust toolchain: rustup default stable-x86_64-pc-windows-msvc
+
+# Clone and build
+git clone <repo>
+cd <repo>
+git checkout native-memory-v1
+cargo build -p victory-gpu --features native-memory
+
+# Run synthetic tests (requires D3D12 hardware)
+cargo test -p victory-gpu --features native-memory --test native_mem_test
+
+# Build the victory executable
+cargo build -p victory --features native-memory
+```
+
 ### Cross-Compilation Setup (for CI)
 ```bash
 # Install Windows target
 rustup target add x86_64-pc-windows-msvc
 
-# Requires Windows SDK and MSVC toolchain
-# Or use cross with Docker:
-cross build --target x86_64-pc-windows-msvc -p victory-gpu --features native-memory
+# Requires Windows SDK and MSVC toolchain (not available on Linux)
+# Use GitHub Actions with windows-latest runner for CI:
+# See .github/workflows/windows.yml example below
 ```
 
-### Native Windows Build
-```bash
-# On Windows with Visual Studio 2022 + Windows SDK
-cargo build -p victory-gpu --features native-memory
-cargo test -p victory-gpu --features native-memory --test native_mem_test
+### GitHub Actions CI Configuration
+```yaml
+# .github/workflows/windows.yml
+name: Windows Build
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+      - name: Build
+        run: cargo build -p victory-gpu --features native-memory
+      - name: Test
+        run: cargo test -p victory-gpu --features native-memory --test native_mem_test
 ```
 
 ---
@@ -243,26 +275,27 @@ cargo test -p victory-gpu --features native-memory --test native_mem_test
 ## Remaining Blockers
 
 ### 1. No Windows Build Environment (Current)
-- **Status**: Cannot compile/test on Linux
-- **Resolution**: Requires Windows CI runner or cross-compilation setup
+- **Status**: Cannot compile/test on Linux (code gated behind `#[cfg(windows)]`)
+- **Resolution**: Requires Windows CI runner (GitHub Actions `windows-latest`) or native Windows build
 
-### 2. Legacy Backend Integration Incomplete
-- **Status**: `LegacyBackend` is stubbed; real integration needs:
-  - Hook `xmem.rs` XMemVirtualAlloc to call backend
-  - Hook `memory.rs::ready()` to use backend for GPU VA
-  - Hook `shadow.rs` buffer creation to use backend
-  - Hook `upload.rs` to use backend ring buffers
-- **Effort**: ~1 week
+### 2. Legacy Backend Integration - COMPLETED
+- **Status**: ✅ Completed - all integration hooks implemented:
+  - ✅ `xmem.rs` XMemVirtualAlloc/XMemVirtualFree notify backend
+  - ✅ `memory.rs::ready()` / `ready_native()` for native path
+  - ✅ `shadow.rs` register/unregister/find route through backend via `ShadowHandle`
+  - ✅ `upload.rs` uses native backend ring buffers when active
+  - ✅ `descriptor/host.rs` uses `ShadowHandle` for native GPU VA
+  - ✅ `draw.rs` uses backend-aware shadow lookups
 
-### 3. Texture/Buffer Resource Support
-- **Status**: Native backend only implements buffer resources
-- **Missing**: Texture resources (placed in heaps, swizzle modes)
-- **Effort**: ~1 week
+### 3. Texture Resource Support - PARTIAL
+- **Status**: ✅ Buffer textures implemented in `native_mem.rs::create_gpu_texture()`
+- **Missing**: Full texture support (swizzle modes, mipmaps, compressed formats)
+- **Effort**: ~3 days
 
 ### 4. Ray-Tracing Structure Support
 - **Status**: `memory.rs` has complex BVH structure handling (packed structures, windows, faults)
-- **Native approach**: Direct GPU VA mapping should work, but needs validation
-- **Effort**: ~2 weeks
+- **Native approach**: Direct GPU VA mapping should work via `ready_native()`, needs validation
+- **Effort**: ~1 week
 
 ### 5. XMemPhysicalPages Mapping
 - **Status**: `xmem.rs` XMemMapPhysicalPages maps physical pages to multiple VAs
@@ -273,6 +306,13 @@ cargo test -p victory-gpu --features native-memory --test native_mem_test
 - **Status**: `shadow.rs` has `Card` struct for VRAM-resident copies with staging
 - **Native approach**: Direct DEFAULT heap resources already in VRAM
 - **Effort**: ~3 days
+
+### 7. Fence-Safe Ring Buffer Wraparound - COMPLETED
+- **Status**: ✅ Implemented in `UploadRing` and `ReadbackRing` with pending allocation tracking
+- **Validation**: Prevents reuse of in-flight memory by checking `fence.GetCompletedValue()`
+
+### 8. Runtime Backend Selection - COMPLETED
+- **Status**: ✅ Implemented via `VICTORY_NATIVE_MEMORY=1` env var and `init_memory_backend_auto()`
 
 ---
 

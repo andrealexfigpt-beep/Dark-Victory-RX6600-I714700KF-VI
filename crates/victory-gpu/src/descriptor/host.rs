@@ -3279,7 +3279,16 @@ impl HostHeap {
         let view = view_at(key as u32, (key >> 32) as u32)?;
         let mut text: String = format!("{view:?}").chars().take(120).collect();
         if let Some((address, len)) = buffer_range(&view) {
-            let host = crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address));
+            let host = {
+                #[cfg(all(windows, feature = "native-memory"))]
+                if crate::memory_backend::is_native_backend_active() {
+                    crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
+                } else {
+                    crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address))
+                }
+                #[cfg(not(all(windows, feature = "native-memory")))]
+                crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address))
+            };
             text.push_str(&format!(" title {address:#x}+{len:#x} host {host:#x?}"));
         }
         Some(text)
@@ -3509,11 +3518,29 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::
         // (The console is lax: a view may begin past its buffer's end.)
         && address >= base
         && address - base < width.max(1)
-        && let Some(shadow) = crate::shadow::find(base, width)
+        && let Some(shadow) = {
+            #[cfg(all(windows, feature = "native-memory"))]
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(base, width)
+            } else {
+                crate::shadow::find(base, width).map(Into::into)
+            }
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            crate::shadow::find(base, width).map(Into::into)
+        }
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
-    let shadow = crate::shadow::find(address, len)?;
+    let shadow = {
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            crate::shadow::find_handle(address, len)
+        } else {
+            crate::shadow::find(address, len).map(Into::into)
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        crate::shadow::find(address, len).map(Into::into)
+    }?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
@@ -3667,8 +3694,17 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = crate::shadow::find(address, len)?;
-    let mut offset = shadow.offset(address);
+    let mut shadow = {
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            crate::shadow::find_handle(address, len)
+        } else {
+            crate::shadow::find(address, len).map(Into::into)
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        crate::shadow::find(address, len).map(Into::into)
+    }?;
+    let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
     // SAFETY: a buffer view's union member.
     let own = unsafe { &mut desc.Anonymous.Buffer };
@@ -3733,7 +3769,7 @@ fn buffer_srv(
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
         host.device
-            .CreateShaderResourceView(&shadow.buffer, Some(&desc), at)
+            .CreateShaderResourceView(shadow.resource(), Some(&desc), at)
     };
     if let Some(twin) = twin {
         let window = twin_window(desc.Format, first, count, stride, raw, width);
@@ -3748,8 +3784,8 @@ fn buffer_srv(
             // SAFETY: a live buffer and a slot of our heap.
             let start = unsafe {
                 host.device
-                    .CreateShaderResourceView(&shadow.buffer, Some(&desc), twin);
-                shadow.buffer.GetGPUVirtualAddress() + first * 4
+                    .CreateShaderResourceView(shadow.resource(), Some(&desc), twin);
+                unsafe { shadow.resource().GetGPUVirtualAddress() } + first * 4
             };
             if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3759,7 +3795,7 @@ fn buffer_srv(
             null_buffer_view(twin);
         }
     }
-    Some(Some(shadow.buffer.clone()))
+    Some(Some(shadow.resource().clone()))
 }
 
 /// An unordered access view of title buffer memory at `address` (`len`
@@ -3774,7 +3810,16 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = crate::shadow::find(address, len)?;
+    let mut shadow = {
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            crate::shadow::find_handle(address, len)
+        } else {
+            crate::shadow::find(address, len).map(Into::into)
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        crate::shadow::find(address, len).map(Into::into)
+    }?;
     let unit = {
         // SAFETY: a buffer view's union member.
         let b = unsafe { desc.Anonymous.Buffer };
@@ -3798,7 +3843,7 @@ fn buffer_uav(
         own.FirstElement = 0;
     }
     // SAFETY: a live buffer.
-    let flags = unsafe { shadow.buffer.GetDesc() }.Flags;
+    let flags = unsafe { shadow.resource().GetDesc() }.Flags;
     if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
         once!("unordered access to a buffer whose host copy shaders cannot write");
         return None;
@@ -3812,7 +3857,7 @@ fn buffer_uav(
     } else {
         crate::resource::element(desc.Format.0 as u32).map_or(0, |(bytes, _)| bytes)
     };
-    let offset = shadow.offset(address);
+    let offset = shadow.offset_in(address).unwrap_or(0);
     // A structured view as a raw view of the same bytes (see `raw_window`).
     let window = (desc.Format == DXGI_FORMAT_UNKNOWN)
         .then(|| raw_window(offset, buffer.FirstElement, buffer.NumElements, buffer.StructureByteStride))
@@ -3838,7 +3883,7 @@ fn buffer_uav(
         desc.Format = DXGI_FORMAT_R32_TYPELESS;
     }
     // SAFETY: a live buffer.
-    let width = unsafe { shadow.buffer.GetDesc() }.Width;
+    let width = unsafe { shadow.resource().GetDesc() }.Width;
     if !buffer_view_ok(desc.Format, first, count, stride, raw, width) {
         REFUSED_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         once!(
@@ -3856,7 +3901,7 @@ fn buffer_uav(
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
         host.device
-            .CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), at)
+            .CreateUnorderedAccessView(shadow.resource(), None::<&ID3D12Resource>, Some(&desc), at)
     };
     if let Some(twin) = twin {
         let window = twin_window(desc.Format, first, count, stride, raw, width);
@@ -3872,8 +3917,8 @@ fn buffer_uav(
             // SAFETY: a live buffer and a slot of our heap.
             let start = unsafe {
                 host.device
-                    .CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), twin);
-                shadow.buffer.GetGPUVirtualAddress() + first * 4
+                    .CreateUnorderedAccessView(shadow.resource(), None::<&ID3D12Resource>, Some(&desc), twin);
+                unsafe { shadow.resource().GetGPUVirtualAddress() } + first * 4
             };
             if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3883,7 +3928,7 @@ fn buffer_uav(
             null_buffer_view(twin);
         }
     }
-    Some(Some(shadow.buffer.clone()))
+    Some(Some(shadow.resource().clone()))
 }
 
 /// Whether the host can make a shader (or unordered access) view of
@@ -4044,7 +4089,16 @@ fn make_twinned(
     let device = &host.device;
     match view {
         &View::Constant(address, size) => {
-            let shadow = crate::shadow::find(address, u64::from(size))?;
+            let shadow = {
+                #[cfg(all(windows, feature = "native-memory"))]
+                if crate::memory_backend::is_native_backend_active() {
+                    crate::shadow::find_handle(address, u64::from(size))
+                } else {
+                    crate::shadow::find(address, u64::from(size)).map(Into::into)
+                }
+                #[cfg(not(all(windows, feature = "native-memory")))]
+                crate::shadow::find(address, u64::from(size)).map(Into::into)
+            }?;
             let gpu = shadow.gpu(address);
             if gpu % 256 != 0 {
                 once!(

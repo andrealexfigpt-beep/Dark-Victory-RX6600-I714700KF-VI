@@ -32,6 +32,9 @@ use windows_sys::core::BOOL;
 
 use crate::{HleModule, hle_export};
 
+#[cfg(windows)]
+use victory_gpu::memory_backend::memory_backend;
+
 const MIB: usize = 1 << 20;
 
 /// Whether we run under Wine (its ntdll exports `wine_get_version`).
@@ -179,6 +182,11 @@ pub extern "system" fn XMemVirtualAlloc(
     }
     if !at.is_null() && !placeholder {
         victory_gpu::title_memory_allocated(at as usize, size);
+        // Also notify memory backend
+        #[cfg(windows)]
+        if let Some(backend) = memory_backend() {
+            let _ = backend.allocate(at as u64, size as u64, protect, false);
+        }
     }
     if port_on() && !at.is_null() && constrained && kind == 0x42000 && flags & ADDRESS_32BIT != 0 {
         LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).push((at as usize, size));
@@ -1993,6 +2001,11 @@ extern "system" fn title_virtual_free(address: *mut c_void, size: usize, kind: u
     // Splitting and joining placeholders changes nothing they show.
     if kind & (MEM_PRESERVE_PLACEHOLDER | MEM_COALESCE_PLACEHOLDERS) == 0 {
         victory_gpu::title_memory_freed(address as usize, size);
+        // Also notify memory backend
+        #[cfg(windows)]
+        if let Some(backend) = memory_backend() {
+            let _ = backend.free(address as u64);
+        }
     }
     // SAFETY: the title's own arguments.
     unsafe { VirtualFree(address, size, kind) }
