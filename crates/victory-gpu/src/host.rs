@@ -978,6 +978,9 @@ fn create() -> windows::core::Result<Host> {
             .ok();
         tracing::info!("host D3D12 device ready");
         
+        // Initialize binding configuration (Phase 3 Native Graphics).
+        crate::host::binding::set_binding_config(crate::host::binding::BindingConfig::native_default());
+        
         // Initialize descriptor heap pools (Phase 3 Native Graphics).
         crate::host::descriptor_pool::init_descriptor_pools(&device)?;
         
@@ -4177,6 +4180,7 @@ mod traffic;
 pub(crate) mod upcheck;
 pub(crate) mod command_pool;
 pub(crate) mod descriptor_pool;
+pub(crate) mod binding;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]

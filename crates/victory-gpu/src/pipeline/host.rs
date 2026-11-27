@@ -350,9 +350,19 @@ const QUADS: i32 = 32;
 /// has no record limit, and a read past the copy reaches whatever the host
 /// placed after it (memory it has freed: the device is removed, upstream
 /// PR #493). `VICTORY_ROOT_SRV_DIRECT=1` goes back to root descriptors.
+/// Phase 3: uses binding config for native graphics path.
 pub(crate) fn bounded_root_srvs() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_ROOT_SRV_DIRECT").is_none())
+    *ON.get_or_init(|| {
+        // Check native binding config first.
+        if crate::host::binding::binding_config().prefer_direct {
+            // Native path: prefer direct binding, so bounded is false.
+            false
+        } else {
+            // Compatibility: bounded unless explicitly disabled.
+            std::env::var_os("VICTORY_ROOT_SRV_DIRECT").is_none()
+        }
+    })
 }
 
 /// One stage of a host pipeline and where its bindings go.
