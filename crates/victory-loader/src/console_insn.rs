@@ -597,12 +597,18 @@ mod tests {
     #[test]
     fn a_clzero_loop_becomes_plain_stores() {
         use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc, VirtualFree};
-        // Against rdx (rm rax, reg rdx) and against rcx, the scratch register.
-        for (cmp, by) in [([0x48, 0x39, 0xd0], 2), ([0x48, 0x39, 0xc8], 1), ([0x4c, 0x39, 0xc0], 8)] {
-            // SAFETY: memory of our own, written and run inside it.
+        // Keep all test cases in reach of the jump stubs allocated for
+        // the first case, even when other tests allocate memory in parallel.
+        // SAFETY: memory of our own, written and run inside it.
+        let allocation = unsafe {
+            VirtualAlloc(std::ptr::null(), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as usize
+        };
+        assert_ne!(allocation, 0);
+        let cases = [([0x48, 0x39, 0xd0], 2), ([0x48, 0x39, 0xc8], 1), ([0x4c, 0x39, 0xc0], 8)];
+        for (slot, (cmp, by)) in cases.into_iter().enumerate() {
+            let page = allocation + slot * 64;
+            // SAFETY: each function occupies fewer than 64 bytes in our allocation.
             unsafe {
-                let page = VirtualAlloc(std::ptr::null(), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as usize;
-                assert_ne!(page, 0);
                 // A function of (start, end): the start in rax, the end in its register, the
                 // loop at 16, and what rax became.
                 let mut head = vec![0x48, 0x89, 0xc8]; // mov rax, rcx
@@ -644,9 +650,10 @@ mod tests {
                     assert_eq!(run(first, first), first + 64);
                     assert!(block[at..at + 64].iter().all(|&b| b == 0) && block[at + 64] == 0xaa);
                 }
-                VirtualFree(page as *mut _, 0, MEM_RELEASE);
             }
         }
+        // SAFETY: all three functions have finished using our allocation.
+        unsafe { VirtualFree(allocation as *mut _, 0, MEM_RELEASE) };
         assert!(clzero_stub(0x1000, 0x2000, [0x48, 0x39, 0xc0]).is_none(), "against rax itself");
         assert!(jump(0x1000, 0x9000_0000_0000).is_none(), "out of reach");
     }

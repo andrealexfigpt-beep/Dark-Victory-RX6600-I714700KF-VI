@@ -3040,15 +3040,23 @@ mod tests {
         unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
     }
 
-    /// A kernel read into a guarded view block fails; opened first, it
-    /// lands and the block counts as written.
+    /// Opening a guarded destination lets file I/O write to it and makes
+    /// the destination visible to the next refresh.
     #[test]
     fn kernel_reads_into_guarded_blocks_after_opening() {
         use std::io::{Read, Seek, Write};
+        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Memory::{
-            CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, UnmapViewOfFile,
+            CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, PAGE_READONLY, UnmapViewOfFile,
         };
-        // SAFETY: a pagefile section of two blocks, mapped read-write.
+
+        let expected = b"from the disk";
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(expected).unwrap();
+        file.rewind().unwrap();
+
+        // SAFETY: a pagefile section of two blocks, mapped read-write. The
+        // mapped view outlives the section handle.
         let view = unsafe {
             let section = CreateFileMappingW(
                 -1isize as _,
@@ -3059,43 +3067,32 @@ mod tests {
                 std::ptr::null(),
             );
             assert!(!section.is_null());
-            MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, 2 * BLOCK).Value as usize
+            let view = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, 2 * BLOCK);
+            CloseHandle(section);
+            view
         };
-        assert_ne!(view, 0);
-        assert!(guard(view, view + 2 * BLOCK).is_some()); // now read-only
-        let mut file = tempfile::tempfile().unwrap();
-        file.write_all(b"from the disk").unwrap();
-        // `ReadFile` inside: the kernel writes the view.
-        let read = |file: &mut std::fs::File| {
-            file.rewind().unwrap();
-            // SAFETY: 13 bytes of our view, nothing else refers to them.
-            let into = unsafe { std::slice::from_raw_parts_mut((view + 100) as *mut u8, 13) };
-            file.read(into).is_ok_and(|n| n == 13)
-        };
-        assert!(
-            !read(&mut file),
-            "the kernel does not fault into our handler"
-        );
-        writing(view + 100, 13);
-        assert!(read(&mut file));
-        // SAFETY: the bytes just read.
-        let landed = unsafe { std::slice::from_raw_parts((view + 100) as *const u8, 13) };
-        assert_eq!(landed, b"from the disk");
-        assert_eq!(
-            guard(view, view + 2 * BLOCK),
-            Some((view / PAGE..view / PAGE + 1).collect())
-        );
-        // Before the view goes, as the runtime does: the address may be
-        // another test's the moment it is free.
-        title_memory_unmapping(view, 2 * BLOCK);
+        let at = view.Value as usize;
+        assert_ne!(at, 0);
+        title_memory_remapped(at, 2 * BLOCK);
+        assert!(guard(at, at + 2 * BLOCK).is_some());
+        assert_eq!(protection(at), PAGE_READONLY);
+        assert_eq!(protection(at + BLOCK), PAGE_READONLY);
+
+        let destination = at + 100;
+        writing(destination, expected.len());
+        assert_eq!(protection(destination), PAGE_READWRITE);
+        assert_eq!(protection(at + BLOCK), PAGE_READONLY);
+
+        // SAFETY: writing opened these bytes in our view for file I/O.
+        let into = unsafe { std::slice::from_raw_parts_mut(destination as *mut u8, expected.len()) };
+        file.read_exact(into).unwrap();
+        assert_eq!(into, expected);
+        assert_eq!(guard(at, at + 2 * BLOCK), Some(vec![at / PAGE]));
+        assert_eq!(protection(destination), PAGE_READONLY);
+
+        title_memory_unmapping(at, 2 * BLOCK);
         // SAFETY: our view.
-        unsafe {
-            UnmapViewOfFile(
-                windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
-                    Value: view as *mut _,
-                },
-            )
-        };
+        assert_ne!(unsafe { UnmapViewOfFile(view) }, 0);
     }
 
     /// A placeholder of `blocks` blocks, each its own.
