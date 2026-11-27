@@ -121,6 +121,7 @@ pub use sampler::StaticSampler;
 pub use lower::{host_settings, set_host_max_wave, set_host_rdna};
 pub use rect::rect_list_gs;
 pub use shader::{
+    LAUNCH_SPACE,
     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
     SLOT_STRIDES_COUNT, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
     raw_views, set_raw_views, set_view_heap_limit, view_heap_limit,
@@ -1783,9 +1784,13 @@ mod tests {
 
     /// The triangle with its far corners at `reach` - 1.
     fn triangle_mesh_to(prim: u32, reach: f32) -> Result<HostShader, ShaderError> {
+        triangle_mesh_with_position(prim, reach, false)
+    }
+
+    fn triangle_mesh_with_position(prim: u32, reach: f32, skip_corner: bool) -> Result<HostShader, ShaderError> {
         // (the second corner's y comes out as 2 x its lane bit: half of it)
         let [x, y] = [reach.to_bits(), (reach / 2.0).to_bits()];
-        let words = [
+        let mut words = vec![
             0xD765_0001u32, // v_mbcnt_lo_u32_b32 v1, -1, 0
             0x0001_00C1,
             0x3604_0281, // v_and_b32 v2, 1, v1
@@ -1808,6 +1813,14 @@ mod tests {
             0x0706_0504,
             0xBF81_0000, // s_endpgm
         ];
+        if skip_corner {
+            // Keep the primitive export, while lane 1 skips its position.
+            let position = words.iter().position(|&word| word == 0xF800_08CF).unwrap();
+            words.splice(position..position, [
+                0x7D8A_0281, // v_cmp_ne_u32 vcc, 1, v1
+                0xBE95_3C6A, // s_and_saveexec_b32 s21, vcc_lo
+            ]);
+        }
         let native = NativeProgram {
             stage: HwStage::Ms,
             wave64: false,
@@ -1908,12 +1921,17 @@ mod tests {
                 eprintln!("no mesh shaders on the {label} device; skipped");
                 continue;
             }
-            for (prim, culled) in [
-                (TRIANGLE, false),
-                (TRIANGLE | EDGE_FLAGS, false),
-                (TRIANGLE | EDGE_FLAGS | CULL, true),
-            ] {
-                let ms = triangle_mesh(prim).unwrap();
+            let mut cases = vec![
+                (TRIANGLE, false, false),
+                (TRIANGLE | EDGE_FLAGS, false, false),
+                (TRIANGLE | EDGE_FLAGS | CULL, false, true),
+            ];
+            if std::env::var_os("VICTORY_MESH_CHECK_POSITIONS").is_some_and(|v| v == "1") {
+                // Corner 1 fits the declared range and never wrote its position.
+                cases.push((TRIANGLE, true, true));
+            }
+            for (prim, skip_corner, culled) in cases {
+                let ms = triangle_mesh_with_position(prim, 4.0, skip_corner).unwrap();
                 let root = host
                     .root_signature_for(&[(&ms, D3D12_SHADER_VISIBILITY_MESH)])
                     .unwrap();

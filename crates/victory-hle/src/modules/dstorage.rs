@@ -551,6 +551,7 @@ struct Lanes {
     /// running them.
     done: (u64, u64, std::time::Duration),
     refused: u64,
+    queue_timing: [u64; 3],
     /// BCPack bytes written and time spent on them.
     bcpack: (u64, std::time::Duration),
     since: Option<std::time::Instant>,
@@ -610,6 +611,7 @@ fn scheduler() -> Option<&'static Scheduler> {
                     lane_now: [0; 3],
                     done: Default::default(),
                     refused: 0,
+                    queue_timing: [0; 3],
                     bcpack: Default::default(),
                     since: None,
                 }),
@@ -807,12 +809,16 @@ impl Lanes {
         if elapsed.as_secs() >= 5 {
             let waiting: usize = self.lanes.values().map(|l| l.reads.len()).sum();
             let reading = READING.swap(0, Ordering::Relaxed) as f64 / 1e9;
+            let [queued, queue_us, max_queue_us] = std::mem::take(&mut self.queue_timing);
             tracing::debug!(target: "victory_hle::streaming",
                 requests = *requests,
                 mb_per_s = format_args!("{:.1}", *bytes as f64 / elapsed.as_secs_f64() / 1e6),
                 busy_workers = format_args!("{:.2}", busy.as_secs_f64() / elapsed.as_secs_f64()),
                 reading_workers = format_args!("{:.2}", reading / elapsed.as_secs_f64()),
                 staging_waits = std::mem::take(&mut self.refused),
+                staging_in_flight_bytes = self.staged,
+                mean_queue_us = queue_us / queued.max(1),
+                max_queue_us,
                 bcpack_mb = self.bcpack.0 / 1_000_000,
                 bcpack_workers = format_args!("{:.2}", self.bcpack.1.as_secs_f64() / elapsed.as_secs_f64()),
                 waiting,
@@ -838,7 +844,7 @@ impl Lanes {
         let lane = self.lanes.get_mut(&id)?;
         let &(seq, Read { request, note }) = lane.reads.front()?;
         let staging = staging_bytes(&request);
-        if self.staged > 0 && self.staged + staging > self.staging {
+        if staging > 0 && self.staged > 0 && self.staged + staging > self.staging {
             self.starved = true;
             self.refused += 1;
             return None;
@@ -846,6 +852,12 @@ impl Lanes {
         lane.reads.pop_front();
         lane.running.insert(seq);
         self.staged += staging;
+        if let Some(submitted) = note.submitted.filter(|_| stream_timing()) {
+            let us = submitted.elapsed().as_micros() as u64;
+            self.queue_timing[0] += 1;
+            self.queue_timing[1] += us;
+            self.queue_timing[2] = self.queue_timing[2].max(us);
+        }
         let size = u64::from(request.destination_size.max(request.source_size)).max(1);
         self.now = self.clock[class];
         self.clock[class] += size * COST[class];
@@ -954,16 +966,22 @@ impl Lane {
     }
 }
 
-/// Staging bytes a request holds while it runs: what it buffers between
-/// the file and the destination. Raw reads go straight to their
-/// destination, memory sources need none (as on the console).
+/// Reserve all temporary data a job can hold at the same time. Physical
+/// page destinations usually map directly, but can need a scatter buffer.
 fn staging_bytes(request: &Request) -> u64 {
-    let buffered = request.options & (ZLIB | BCPACK | PAGE_DESTINATION) != 0;
-    if buffered && request.options & MEMORY_SOURCE == 0 {
-        u64::from(request.source_size)
-    } else {
+    let compressed = request.options & (ZLIB | BCPACK) != 0;
+    let file = request.options & MEMORY_SOURCE == 0;
+    let staged_input = if compressed && file { request.source_size } else { 0 };
+    let chained = request.options & ZLIB != 0 && request.options & BCPACK != 0;
+    let intermediate = if chained { request.intermediate_size } else { 0 };
+    let scatter = if request.options & PAGE_DESTINATION == 0 {
         0
-    }
+    } else if compressed {
+        request.destination_size
+    } else {
+        request.source_size
+    };
+    u64::from(staged_input) + u64::from(intermediate) + u64::from(scatter)
 }
 
 /// Ends a queue: what was not started is dropped, and this waits for the
@@ -1061,6 +1079,11 @@ struct Note {
     early: bool,
 }
 
+fn stream_timing() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_STREAM_TIMING").is_some_and(|value| value == "1"))
+}
+
 impl Note {
     fn enqueued(request: &Request) -> Note {
         match trace() {
@@ -1076,7 +1099,7 @@ impl Note {
 
     fn submitted(&mut self, request: &Request, early: bool) {
         self.early = early;
-        if trace() > 0 || stream_log::on() {
+        if trace() > 0 || stream_log::on() || stream_timing() {
             self.submitted = Some(std::time::Instant::now());
         }
         if trace() > 0 {
@@ -1399,9 +1422,12 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
     let tables = if bc != 0 { Some(bcpack_tables()?) } else { None };
     with_source(request, |source| {
         let write = |bytes: &[u8]| into_destination(request, size, |out| match tables {
-            Some(tables) => bcpack::decode(bc, bytes, out, tables)
-                .map(|()| out.len())
-                .map_err(|e| fail(INVALID_DATA, &e.to_string())),
+            Some(tables) => {
+                let _decode = victory_gpu::timeline::span("streaming: BCPack");
+                bcpack::decode(bc, bytes, out, tables)
+                    .map(|()| out.len())
+                    .map_err(|e| fail(INVALID_DATA, &e.to_string()))
+            }
             None => inflate(bytes, out).map_err(|hr| fail(hr, "zlib")),
         });
         if bc != 0 && options & ZLIB != 0 {
@@ -1426,6 +1452,7 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
 /// that ends short of `out` passes: the title's chunks fill it exactly, and
 /// nothing says that is required.
 fn inflate(source: &[u8], out: &mut [u8]) -> Result<usize, HRESULT> {
+    let _decode = victory_gpu::timeline::span("streaming: zlib");
     thread_local! {
         static INFLATE: std::cell::RefCell<zlib_rs::Inflate> =
             std::cell::RefCell::new(zlib_rs::Inflate::new(true, 15));
@@ -1544,7 +1571,10 @@ fn with_source(
         return decode(unsafe { std::slice::from_raw_parts(request.source.cast(), size) });
     }
     stream_buffer(&SOURCE, size, |bytes| {
-        read_into(request, bytes).map_err(read_error)?;
+        {
+            let _reading = victory_gpu::timeline::span("streaming: compressed input read");
+            read_into(request, bytes).map_err(read_error)?;
+        }
         decode(bytes)
     })
 }
@@ -2249,6 +2279,7 @@ mod tests {
             lane_now: [0; 3],
             done: Default::default(),
             refused: 0,
+            queue_timing: [0; 3],
             bcpack: Default::default(),
             since: None,
         }
@@ -2305,7 +2336,24 @@ mod tests {
         l.submit(0, false);
         assert!(l.start().is_none());
         l.finish(&second, Ok(()));
-        assert!(l.start().is_some());
+        let large = l.start().unwrap();
+        read(&mut l, 0, 0, 20);
+        l.submit(0, false);
+        assert_eq!(l.start().unwrap().staging, 0, "direct I/O needs no staging");
+        l.finish(&large, Ok(()));
+    }
+
+    #[test]
+    fn staging_accounts_for_chained_decode_and_scatter_output() {
+        let mut r = request(ZLIB | BCPACK | PAGE_DESTINATION, std::ptr::null_mut(), 0, std::ptr::null(), 0, 0);
+        r.source_size = 64;
+        r.intermediate_size = 128;
+        r.destination_size = 512;
+        assert_eq!(staging_bytes(&r), 704);
+        r.options |= MEMORY_SOURCE;
+        assert_eq!(staging_bytes(&r), 640);
+        r.options = PAGE_DESTINATION;
+        assert_eq!(staging_bytes(&r), 64);
     }
 
     #[test]

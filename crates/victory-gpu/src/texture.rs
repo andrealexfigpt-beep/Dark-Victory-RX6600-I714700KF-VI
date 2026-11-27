@@ -437,16 +437,45 @@ thread_local! {
     static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Calls `f` with `size` bytes of this thread's read buffer (their
-/// contents are whatever the last texture left).
+/// Large reads share a bounded pool so a briefly busy worker does not
+/// keep its largest texture buffer for the rest of the session.
+const LOCAL_READ_BYTES: usize = 2 << 20;
+const LARGE_READ_CACHE_BYTES: usize = 48 << 20;
+static LARGE_READS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
 fn with_read<R>(size: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
-    READ.with(|read| {
-        let mut read = read.borrow_mut();
-        if read.len() < size {
-            read.resize(size, 0);
-        }
-        f(&mut read[..size])
-    })
+    if size <= LOCAL_READ_BYTES {
+        return READ.with(|read| {
+            let mut read = read.borrow_mut();
+            if read.len() < size {
+                read.resize(size, 0);
+            }
+            f(&mut read[..size])
+        });
+    }
+    let mut read = {
+        let mut pool = LARGE_READS.lock().unwrap_or_else(|e| e.into_inner());
+        let fit = pool.iter().enumerate().filter(|(_, b)| b.capacity() >= size)
+            .min_by_key(|(_, b)| b.capacity()).map(|(i, _)| i);
+        fit.map_or_else(Vec::new, |i| pool.swap_remove(i))
+    };
+    if read.len() < size {
+        read.resize(size, 0);
+    }
+    let result = f(&mut read[..size]);
+    let mut pool = LARGE_READS.lock().unwrap_or_else(|e| e.into_inner());
+    if read.capacity() + pool.iter().map(Vec::capacity).sum::<usize>() <= LARGE_READ_CACHE_BYTES {
+        pool.push(read);
+    }
+    result
+}
+
+/// Only unused scratch can be dropped. Active readers own their buffers.
+pub(crate) fn trim_read_scratch(headroom: Option<u64>) {
+    if headroom.is_some_and(|available| available < 1 << 30) {
+        let released = std::mem::take(&mut *LARGE_READS.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(released);
+    }
 }
 
 /// Whether a texture all of whose memory is mapped is read through the
@@ -524,33 +553,26 @@ pub(crate) fn let_go() -> [u64; 2] {
 /// them, 2.1 GB, at the end of run 24). The next list that samples such a
 /// texture makes a staging buffer anew, detiles and uploads once more.
 /// Called before a submission starts, by the thread that submits.
-pub(crate) fn let_go_idle() {
+pub(crate) fn let_go_idle(headroom: Option<u64>) {
     use std::sync::atomic::Ordering::Relaxed;
     const IDLE_FRAMES: u64 = 4;
-    let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(map) = map.as_mut() else {
-        return;
+    let idle_ms = crate::host::ram_idle_ms(headroom);
+    let idle: Vec<_> = {
+        let mut staging = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(map) = staging.as_mut() else { return };
+        map.extract_if(|_, stage| {
+            Arc::strong_count(stage) == 1
+                && crate::host::long_ago(stage.used.load(Relaxed), idle_ms, IDLE_FRAMES)
+        }).map(|(_, stage)| stage).collect()
     };
-    if map.is_empty() {
-        return;
-    }
-    let idle_ms = crate::host::ram_idle_ms(crate::host::ram_headroom());
-    // A list that recorded an upload or a check holds the staging until it
-    // is reset: one only the table holds is named by no list, recorded or
-    // running.
-    let (mut went, mut bytes) = (0u64, 0u64);
-    map.retain(|_, s| {
-        let keep = Arc::strong_count(s) > 1
-            || !crate::host::long_ago(s.used.load(Relaxed), idle_ms, IDLE_FRAMES);
-        if !keep {
-            LET_GO[0].fetch_add(1, Relaxed);
-            LET_GO[1].fetch_add(s.bytes, Relaxed);
-            went += 1;
-            bytes += s.bytes;
-        }
-        keep
-    });
-    if went > 0 {
+    if !idle.is_empty() {
+        let went = idle.len() as u64;
+        let bytes = idle.iter().map(|stage| stage.bytes).sum::<u64>();
+        LET_GO[0].fetch_add(went, Relaxed);
+        LET_GO[1].fetch_add(bytes, Relaxed);
+        // Destruction can call the driver or return a piece to the upload
+        // pool. The table remains available for streaming during that work.
+        drop(idle);
         crate::host::trail(|| format!("sweep: {went} staging buffers of textures let go ({} KiB), held by no list", bytes >> 10));
     }
 }
@@ -1308,7 +1330,7 @@ impl Staging {
         // stays mapped (see `crate::watch::title_memory_reading`; without
         // it a page went between the asking and the read in runs 71 and
         // 74).
-        let _mapped = if no_wait() {
+        let mapped_guard = if no_wait() {
             // Not waited for: while the runtime remaps title memory the
             // texture is read through the kernel instead, whole or not at
             // all (`no_wait`).
@@ -1335,7 +1357,9 @@ impl Staging {
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
             let changed = with_read(size, |read| {
-                if crate::host::read_there(self.memory, read) == 0 {
+                let readable = crate::host::read_there(self.memory, read) != 0;
+                drop(mapped_guard);
+                if !readable {
                     return false;
                 }
                 let hash = digest(read);
@@ -1359,6 +1383,7 @@ impl Staging {
         last.partial = None;
         if through_copy() {
             return with_title(self.memory, size, |tiled| {
+                drop(mapped_guard);
                 let hash = digest(tiled);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
@@ -1374,7 +1399,7 @@ impl Staging {
             });
         }
         // SAFETY: committed memory of the texture's layout size, and it
-        // stays committed while `_mapped` is held.
+        // stays committed while `mapped_guard` is held.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
         let hash = digest(tiled);
         #[cfg(feature = "diagnostics")]
@@ -1384,7 +1409,17 @@ impl Staging {
         }
         last.hash = Some(hash);
         found_blind(last);
-        self.detile(tiled);
+        if size >= 256 << 10 {
+            // Hold the mapping only long enough to snapshot the changed
+            // bytes. Detiling a large texture must not block new mappings.
+            with_read(size, |snapshot| {
+                snapshot.copy_from_slice(tiled);
+                drop(mapped_guard);
+                self.detile(snapshot);
+            });
+        } else {
+            self.detile(tiled);
+        }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
         size

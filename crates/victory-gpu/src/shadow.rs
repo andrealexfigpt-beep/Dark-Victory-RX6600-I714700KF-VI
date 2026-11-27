@@ -153,6 +153,8 @@ pub(crate) struct Shadow {
     ranged: Mutex<[(usize, usize, u64); 2]>,
     /// Whether the memory is write-watched: unknown, yes, no.
     watched: AtomicU8,
+    /// Last full refresh scheduled by a heap pass, or MAX before the first one.
+    unwatched_frame: AtomicU64,
     /// Ranges shaders of a submission not yet copied back may be writing,
     /// sorted by start and then end. Title memory there is older than the copy.
     pending: Mutex<Vec<(usize, usize)>>,
@@ -852,20 +854,6 @@ pub(crate) fn stale_pages(most: usize, say: &mut dyn FnMut(&Shadow, usize, usize
     done
 }
 
-/// Copies of memory (from, to, bytes: apart), on several threads if they are
-/// many.
-pub(crate) fn copy_all(copies: Vec<(usize, usize, usize)>) {
-    let bytes: usize = copies.iter().map(|c| c.2).sum();
-    if bytes > 4 << 20 {
-        copy_ranges_wide(copies);
-        return;
-    }
-    for (src, dst, len) in copies {
-        // SAFETY: the caller's ranges.
-        unsafe { std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, len) };
-    }
-}
-
 /// A title buffer copy was done on the CPU into `[dst, dst + len)`: all of it
 /// goes up to the copies in the card's memory that hold it, whether their
 /// CPU side held the same before or not. Left out is what shaders in the air
@@ -1452,7 +1440,14 @@ impl SnapshotPool {
     fn trim(&mut self, limit: usize) -> Vec<Vec<u8>> {
         let mut gone = Vec::new();
         while self.bytes > self.budget || self.count > limit {
-            let capacity = *self.by_capacity.first_key_value().unwrap().0;
+            // A byte budget cut can be satisfied without clearing all of
+            // the smaller buffers that common refreshes can reuse.
+            let bucket = if self.bytes > self.budget {
+                self.by_capacity.last_key_value()
+            } else {
+                self.by_capacity.first_key_value()
+            };
+            let capacity = *bucket.unwrap().0;
             gone.extend(self.remove(capacity));
         }
         gone
@@ -1480,6 +1475,7 @@ fn give_back(buffer: Vec<u8>) {
 
 pub(crate) fn trim_snapshots(headroom: Option<u64>) {
     let budget = match headroom {
+        Some(bytes) if bytes < 512 << 20 => 32 << 20,
         Some(bytes) if bytes < 768 << 20 => 128 << 20,
         Some(bytes) if bytes < 2 << 30 => 256 << 20,
         _ => SNAPSHOT_POOL_BYTES,
@@ -1507,6 +1503,12 @@ fn snapshot_pool_uses_best_fit_and_releases_excess_capacity() {
     pool.budget = small;
     assert_eq!(pool.trim(2).len(), 1);
     assert_eq!((pool.count, pool.bytes), (0, 0));
+    pool.budget = small + large;
+    assert!(pool.retain(Vec::with_capacity(small), 2).is_empty());
+    assert!(pool.retain(Vec::with_capacity(large), 2).is_empty());
+    pool.budget = small;
+    assert_eq!(pool.trim(2)[0].capacity(), large);
+    assert_eq!((pool.count, pool.bytes), (1, small));
 }
 
 const NOT_WATCHED: u8 = 2;
@@ -3040,8 +3042,13 @@ pub(crate) fn window_use() -> [u64; 10] {
 ///
 /// The next read of that memory makes a new copy and copies the window
 /// again. Called before a submission starts, by the thread that submits.
-pub(crate) fn let_go_idle() {
+pub(crate) fn let_go_idle(headroom: Option<u64>) {
     const IDLE_FRAMES: u64 = 4;
+    let idle_ms = if headroom.is_some_and(|bytes| bytes < 512 << 20) {
+        1_000
+    } else {
+        crate::host::ram_idle_ms(headroom)
+    };
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
         // under the same lock, so none is handed out in between.
@@ -3049,7 +3056,6 @@ pub(crate) fn let_go_idle() {
         if map.is_empty() {
             return;
         }
-        let idle_ms = crate::host::ram_idle_ms(crate::host::ram_headroom());
         let idle: Vec<(u64, u64)> = map
             .iter()
             .filter(|(_, s)| {
@@ -3218,6 +3224,22 @@ impl Shadow {
         self.watched.load(Ordering::Relaxed) == NOT_WATCHED
     }
 
+    /// Claim this copy's full refresh even when several heaps view it.
+    pub(crate) fn take_unwatched_refresh(&self, frame: u64) -> bool {
+        static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let every = *EVERY.get_or_init(|| {
+            std::env::var("VICTORY_UNWATCHED_FRAMES")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1)
+        });
+        self.unwatched_frame
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                (last == u64::MAX || frame >= last.saturating_add(every)).then_some(frame)
+            })
+            .is_ok()
+    }
+
     /// Whether a submission asks the kernel about the copy's ranges ahead:
     /// not of memory that is not watched, nor of view memory, which the
     /// kernel would refuse (and with it the ranges asked about together).
@@ -3294,6 +3316,7 @@ impl Shadow {
             before: Mutex::default(),
             merging: RwLock::default(),
             kept: Mutex::default(),
+            unwatched_frame: AtomicU64::new(u64::MAX),
             used: AtomicU64::new(crate::host::moment()),
             asked: [AtomicU64::new(u64::MAX), AtomicU64::new(0)],
             unsized_asks: AtomicU64::new(0),
@@ -4821,14 +4844,19 @@ impl Shadow {
     /// # Safety
     /// The third of each piece is the address of its bytes, which stay as
     /// they are during the call.
-    pub(crate) unsafe fn land_card(&self, pieces: &[(usize, usize, usize)], fetched_after: u64, notes: &mut crate::land::Notes) -> u64 {
+    pub(crate) unsafe fn land_card(
+        &self,
+        pieces: impl Iterator<Item = (usize, usize, usize)> + Clone,
+        fetched_after: u64,
+        notes: &mut crate::land::Notes,
+    ) -> u64 {
         let Some(card) = &self.card else {
             return 0;
         };
         let waiting = std::time::Instant::now();
         let _merging = self.merging.read().unwrap_or_else(|e| e.into_inner());
         crate::land::spent(crate::land::stat::LOCK, waiting);
-        let (from, to) = pieces.iter().fold((usize::MAX, 0), |(a, b), p| (a.min(p.0), b.max(p.1)));
+        let (from, to) = pieces.clone().fold((usize::MAX, 0), |(a, b), p| (a.min(p.0), b.max(p.1)));
         let skip: Vec<(usize, usize)> = {
             let dirty = card.dirty.lock().unwrap_or_else(|e| e.into_inner());
             let sent = card.sent.lock().unwrap_or_else(|e| e.into_inner());
@@ -4836,20 +4864,42 @@ impl Shadow {
             sent.near(fetched_after, from, to, &mut skip);
             skip
         };
+        // Normalize once per run, then visit only exclusions touching this piece.
+        let skip = if skip.len() > 1 { joined(skip) } else { skip };
+        let mut gaps = Vec::new();
         let mut put = 0;
-        for &(lo, hi, now) in pieces {
+        for (lo, hi, now) in pieces {
             if lo >= hi || hi > self.len as usize {
                 continue;
             }
-            let near: Vec<(usize, usize)> = skip.iter().copied().filter(|&(a, b)| a < hi && b > lo).collect();
-            let parts: Vec<(usize, usize)> = outside(lo, hi, near).into_iter().map(|(a, b)| (a - lo, b - lo)).collect();
+            let first = skip.partition_point(|&(_, end)| end <= lo);
+            let full = [(0, hi - lo)];
+            let parts = if skip.get(first).is_none_or(|&(start, _)| start >= hi) {
+                &full[..]
+            } else {
+                gaps.clear();
+                let mut pos = lo;
+                for &(start, end) in &skip[first..] {
+                    if start >= hi {
+                        break;
+                    }
+                    if pos < start {
+                        gaps.push((pos - lo, start - lo));
+                    }
+                    pos = pos.max(end);
+                }
+                if pos < hi {
+                    gaps.push((pos - lo, hi - lo));
+                }
+                &gaps[..]
+            };
             // SAFETY: inside the mapping (checked above), in a range
             // declared and not done with, which no refresh writes; the
             // title's bytes are kept out by the lock; the caller's.
             // Where title memory is not mapped the CPU's side keeps what
             // the card wrote, as before.
             let merged =
-                unsafe { crate::land::piece(self.start as usize + lo, now as *const u8, self.data.add(lo), &parts, true, notes, self) };
+                unsafe { crate::land::piece(self.start as usize + lo, now as *const u8, self.data.add(lo), parts, true, notes, self) };
             self.walls_merged(hi - lo, merged as usize);
             if merged > 0 {
                 self.note_landing(lo, hi);
@@ -5033,7 +5083,7 @@ mod land_tests {
                     pieces.iter().map(|&(lo, hi)| (lo, hi, now.as_ptr() as usize + lo)).collect();
                 let mut notes = crate::land::Notes::default();
                 // SAFETY: the fetched bytes are `now`'s.
-                unsafe { many.land_card(&addressed, after, &mut notes) };
+                unsafe { many.land_card(addressed.iter().copied(), after, &mut notes) };
                 notes.flush();
                 assert!(bytes(a) == bytes(b), "title memory, round {round}");
                 assert!(bytes(one.data as usize) == bytes(many.data as usize), "the CPU's side, round {round}");
@@ -5096,7 +5146,7 @@ mod land_tests {
                     let mut notes = crate::land::Notes::default();
                     let (lo, hi) = (b * PIECE, (b + 1) * PIECE);
                     // SAFETY: the fetched bytes are `now`'s; each block once.
-                    unsafe { shadow.land_card(&[(lo, hi, at + lo)], 8, &mut notes) };
+                    unsafe { shadow.land_card(std::iter::once((lo, hi, at + lo)), 8, &mut notes) };
                     notes.flush();
                 });
                 for i in (3..LEN / 4).step_by(4 * 53) {
@@ -5286,7 +5336,7 @@ pub(crate) fn find_known(address: u64, len: u64) -> Option<Arc<Shadow>> {
     if len <= 1 {
         return find(address, len);
     }
-    lookup_with(address, len, false, known_grid(len), false, 1)
+    lookup_with(address, len, true, known_grid(len), false, 1)
 }
 
 pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
@@ -5362,7 +5412,9 @@ fn lookup_with(
         // memory. Not the big ones `cards` puts in the card's memory: those
         // are read too often to stay in the PC's.
         let big = cards() && (size >= card_limits().0 || card_all());
-        if !big && let Some(placed) = crate::inplace::place_for(key.0, len, false) {
+        if let Some(placed) = crate::port::place_for(key.0, len, false)
+            .or_else(|| (!big).then(|| crate::inplace::place_for(key.0, len, false)).flatten())
+        {
             entry.shadow = Some(Arc::new(Shadow::placed(placed, key.0, len, false)));
             return entry.shadow.clone();
         }
@@ -5649,7 +5701,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool, sized_grid: u64) 
         }
     };
     let tail = unsized_ask && tails();
-    let reuse = any && !unsized_ask && fine();
+    let reuse = any && !unsized_ask;
     let key = |map: &BTreeMap<(u64, u64), Arc<Shadow>>| {
         if tail {
             let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
@@ -5677,7 +5729,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool, sized_grid: u64) 
     }
     // In place, if asked for and the window's memory can be opened: the
     // window is the title's own memory, with nothing to copy.
-    if let Some(placed) = crate::inplace::place_for(start, len, true) {
+    if let Some(placed) = crate::port::place_for(start, len, true).or_else(|| crate::inplace::place_for(start, len, true)) {
         let shadow = Arc::new(Shadow::placed(placed, start, len, true));
         note(&shadow);
         map.insert((start, len), shadow.clone());

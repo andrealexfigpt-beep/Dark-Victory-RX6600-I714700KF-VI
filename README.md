@@ -99,19 +99,18 @@ cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path-to-your-title-executable>
 ```
 
-The borderless Full HD Series S profile uses FidelityFX upscaling and
+The Series S profile defaults to Full HD borderless, 1 MiB memory windows
+for sized requests, compact tails and shader warm-up. It uses FSR 4 and
 frame generation when the signed AMD SDK 2.4 is available. Pass
 `-FidelityFxDir <path-to-signedbin>` to select your SDK installation.
-`-Native` selects the original path and `-NoFrameGeneration` keeps
-FidelityFX upscaling active. See [the FidelityFX setup](docs/fidelityfx.md).
+`-Native` selects the original path, `-NoFrameGeneration` keeps
+FidelityFX upscaling active, and `-Windowed` opens a window up to 1600×900.
+See [the FidelityFX setup](docs/fidelityfx.md).
 
 For the Dark Full HD/fullscreen profile:
 
 ```powershell
-scripts\play.ps1 -Exe <path-to-your-title-executable> -More @{
-    VICTORY_DISPLAY_MODE = '1920x1080'
-    VICTORY_FULLSCREEN   = '1'
-}
+scripts\play.ps1 -Exe <path-to-your-title-executable> -Fullscreen
 ```
 
 Use `scripts\play.ps1 -Safe` when diagnosing a new problem. Ray tracing is opt-in

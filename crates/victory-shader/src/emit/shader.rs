@@ -12,6 +12,13 @@ pub const SAMPLER_SPACE: u32 = 0;
 /// Where root CBVs and SRVs are bound: `b<root parameter index>` and
 /// `t<root parameter index>` in this space.
 pub const ROOT_CBV_SPACE: u32 = 1;
+/// Register space for the host amplification shader's arguments.
+pub const LAUNCH_SPACE: u32 = 9;
+
+pub(super) fn mesh_payload_bytes() -> u32 {
+    static BYTES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| 4 * u32::from(std::env::var_os("VICTORY_MESH_LAUNCH").is_some_and(|value| value == "1")))
+}
 
 /// The root SRV `t<SLOT_STRIDES>` in [`ROOT_CBV_SPACE`] of a shader that
 /// reads buffers through descriptors it picks from the view heap at an
@@ -826,7 +833,7 @@ impl Shader {
                         mesh.max_vertices,
                         mesh.max_primitives,
                         mesh.topology.into(),
-                        0,
+                        mesh_payload_bytes(),
                     ]
                     .map(|n| Some(i32c(&mut self, n)));
                     let mut node = vec![Some(t)];

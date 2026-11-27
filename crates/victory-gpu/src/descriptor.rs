@@ -136,6 +136,7 @@ static SHADER_HEAPS: std::sync::RwLock<Vec<(u64, u64, usize)>> = std::sync::RwLo
 /// so `Heap::drop` cannot free the heap concurrently.
 #[cfg(windows)]
 fn mirror(handle: u64) {
+    crate::port_descriptors::mark(handle, 32);
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
     let Some(&(_, _, at)) = heaps
         .iter()
@@ -207,10 +208,9 @@ static SYNC_ROUNDS: (std::sync::Mutex<(u64, u64)>, std::sync::Condvar) = (std::s
 pub(crate) struct SyncedHeaps(Option<u64>);
 
 #[cfg(windows)]
-pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
+fn start_sync_worker() -> bool {
     if !sync_aside() {
-        sync_heaps();
-        return SyncedHeaps(None);
+        return false;
     }
     static STARTED: std::sync::Once = std::sync::Once::new();
     static THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -256,7 +256,26 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
         });
         THREAD.store(made.is_ok(), std::sync::atomic::Ordering::Release);
     });
-    if !THREAD.load(std::sync::atomic::Ordering::Acquire) {
+    THREAD.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// A submit can start discovery early, but the actual submit still asks for
+/// its own round after waits and CPU writes. At most one extra round queues.
+#[cfg(windows)]
+pub(crate) fn prefetch_heap_sync() {
+    if !crate::watch::partition_journal() || !start_sync_worker() {
+        return;
+    }
+    let mut rounds = SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner());
+    if rounds.0 == rounds.1 {
+        rounds.0 += 1;
+        SYNC_ROUNDS.1.notify_one();
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
+    if !start_sync_worker() {
         sync_heaps();
         return SyncedHeaps(None);
     }
@@ -347,7 +366,11 @@ pub(crate) fn sync_heaps() {
         // its whole mirrored range, so raw descriptor copies are never lost.
         let mut make: Vec<u32> = Vec::new();
         let began = std::time::Instant::now();
-        let taken = match &heap.written {
+        // Exact marks supplement the write watch. An initial snapshot and
+        // stores outside the patched loops need the tracked scan in the same
+        // sync, before a shader can read their descriptors.
+        let marked = crate::port_descriptors::take(start);
+        let mut taken = match &heap.written {
             Some(written) => written.take(start as usize, end as usize),
             None => {
                 SYNC_FALLBACK.fetch_add(1, Relaxed);
@@ -362,6 +385,9 @@ pub(crate) fn sync_heaps() {
             }
         };
         spent[0] += since(began);
+        if let Some(marked) = marked {
+            taken.extend(marked);
+        }
         let parts = record_parts(taken, start as usize, step, mirrored_count);
         // A few tracked blocks a thread at a time: read, compared with what
         // was last seen there and sorted out, beside one another. The ranges
@@ -578,6 +604,7 @@ static SYNC_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Nothing while no heap page changed.
 #[cfg(windows)]
 pub(crate) fn sync_line(frames: f64) {
+    crate::port_descriptors::line(frames);
     let [twins, moved, lost] = [0, 1, 2].map(|i| host::TWINS[i].swap(0, std::sync::atomic::Ordering::Relaxed));
     if twins > 0 {
         tracing::info!(
@@ -755,6 +782,7 @@ impl Drop for Heap {
         let at = std::ptr::from_ref::<Heap>(self) as usize;
         let mut heaps = SHADER_HEAPS.write().unwrap_or_else(|e| e.into_inner());
         heaps.retain(|&(_, _, h)| h != at);
+        crate::port_descriptors::let_go(self.start);
     }
 }
 
@@ -1600,6 +1628,9 @@ pub(crate) extern "system" fn create_heap(
         let at = std::ptr::from_ref::<Heap>(&heap) as usize;
         let mut heaps = SHADER_HEAPS.write().unwrap_or_else(|e| e.into_inner());
         heaps.push((start, start + size, at));
+        if placed && desc.kind == VIEWS_KIND && heap.written.is_some() {
+            crate::port_descriptors::adopt(start, desc.count);
+        }
     }
     #[cfg(not(windows))]
     let _ = visible;
@@ -1702,6 +1733,21 @@ mod tests {
             ]
         );
         assert_eq!(changed_slots(parts[0].0, parts[0].1, start, step, 1000), 127..129);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_marks_and_tracked_pages_are_processed_together_without_duplicates() {
+        let start = 0x1000;
+        let tracked_and_marked = vec![
+            (start, start + 4096),
+            (start + 32, start + 64),
+            (start + 4096 + 32, start + 4096 + 64),
+        ];
+        assert_eq!(
+            record_parts(tracked_and_marked, start, 32, 256),
+            [(start, start + 4096), (start + 4096 + 32, start + 4096 + 64)]
+        );
     }
 
     #[cfg(windows)]

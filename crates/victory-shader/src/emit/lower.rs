@@ -259,6 +259,13 @@ fn half_shift(width: u32) -> u32 {
     if width == 16 { 0 } else { 15 - width }
 }
 
+#[derive(Clone, Copy)]
+struct MeshExports {
+    positions: V,
+    primitives: V,
+    exit: usize,
+}
+
 struct Lower<'a> {
     s: Shader,
     x: &'a Parts<'a>,
@@ -321,6 +328,7 @@ struct Lower<'a> {
     console_lanes: bool,
     /// Mesh: the thread index in the group (made in the entry block).
     flat: Option<V>,
+    mesh_exports: Option<MeshExports>,
     /// Mesh: IR blocks whose `s_barrier` is left out.
     no_barrier: HashSet<usize>,
     /// IR blocks whose `s_barrier` not every lane is sure to reach (a lane
@@ -1693,6 +1701,7 @@ impl<'a> Lower<'a> {
             halves,
             wave_base: None,
             flat: None,
+            mesh_exports: None,
             no_barrier,
             fence_only,
             half_outputs: half_outputs(&x.native.io, &x.outputs),
@@ -2413,6 +2422,12 @@ impl<'a> Lower<'a> {
             }
             self.tail[b] = Some(self.cur);
             self.exit(b)?;
+        }
+        if let Some(exports) = self.mesh_exports {
+            self.mesh_exit_indices(exports);
+            // PSV0 reports all group-shared data. The two private mesh
+            // arrays are separate from the console-addressable LDS.
+            self.s.lds_dwords += 2 * self.s.threads.expect("mesh threads")[0];
         }
         self.fill_phis()?;
         let user_data = self.user_reads.values().copied().collect();
@@ -4622,13 +4637,31 @@ impl<'a> Lower<'a> {
             .op(e, "setMeshOutputCounts", Attr::NoUnwind, void, 168, &[v, p]);
         let flat = self.mesh_thread();
         let z = self.s.m.i32(0);
+        // Account for both temporary arrays in the host's shared-memory
+        // budget. Meshes without room keep the original export path.
+        if threads != 0
+            && self.s.lds_dwords.saturating_add(threads.saturating_mul(2)) <= 8192
+            && std::env::var_os("VICTORY_MESH_CHECK_POSITIONS").is_some_and(|v| v == "1")
+        {
+            let shape = self.s.m.array(threads, self.s.t.i32);
+            let positions = self.s.m.global("mesh_positions_written", shape, 3);
+            let primitives = self.s.m.global("mesh_pending_indices", shape, 3);
+            let exit = self.s.m.new_block();
+            self.mesh_exports = Some(MeshExports { positions, primitives, exit });
+            let position = self.s.m.element(e, positions, flat);
+            self.s.m.store(e, position, z);
+            let indices = self.s.m.element(e, primitives, flat);
+            let culled = self.s.m.i32(u32::MAX);
+            self.s.m.store(e, indices, culled);
+        }
         // Every primitive of the declared count starts culled, also those
         // past the lanes (a count of 256 with 128 lanes): lane n culls
         // primitives n, n + lanes, ... The host draws all it was promised,
         // and one never written has whatever indices its memory held: long
         // triangles over the whole target, each pixel of them shaded.
         let passes = mesh.max_primitives.div_ceil(threads.max(1));
-        for pass in 0..passes {
+        let first_pass = u32::from(self.mesh_exports.is_some());
+        for pass in first_pass..passes {
             let index = if pass == 0 {
                 flat
             } else {
@@ -12248,6 +12281,11 @@ impl<'a> Lower<'a> {
             (true, true) => ("storePrimitiveOutput", 172),
         };
         for (id, col, value, half) in stores {
+            if e.target == Target::Position(0)
+                && let Some(exports) = self.mesh_exports
+            {
+                self.mesh_position_component(exports.positions, col);
+            }
             let mut x = self.i32_of(value)?;
             if let Some(high) = half {
                 // An f16 half, declared a 32-bit float on the host.
@@ -12298,6 +12336,60 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// Each lane records the position components it actually exported.
+    /// One lane owns each vertex, so these updates never contend.
+    fn mesh_position_component(&mut self, positions: V, component: u8) {
+        let c = self.cur;
+        let lane = self.mesh_thread();
+        let ptr = self.s.m.element(c, positions, lane);
+        let previous = self.s.m.load(c, ptr);
+        let bit = self.s.m.i32(1u32 << component);
+        let written = self.s.m.bin(c, Bin::Or, previous, bit);
+        self.s.m.store(c, ptr, written);
+    }
+
+    fn mesh_exit_indices(&mut self, exports: MeshExports) {
+        self.cur = exports.exit;
+        self.group_sync(self.cur);
+        let lane = self.mesh_thread();
+        let mesh = self.s.mesh.expect("mesh exports");
+        let threads = self.s.threads.expect("mesh threads")[0];
+        let written = mesh.max_vertices.min(threads);
+        let guard = (threads > mesh.max_primitives).then(|| {
+            let limit = self.s.m.i32(mesh.max_primitives);
+            self.s.m.cmp(self.cur, pred::IULT, lane, limit)
+        });
+        let at = self.begin_guarded(guard);
+        let c = self.cur;
+        let ptr = self.s.m.element(c, exports.primitives, lane);
+        let packed = self.s.m.load(c, ptr);
+        let zero = self.s.m.i32(0);
+        let limit = self.s.m.i32(written);
+        let full = self.s.m.i32(0xf);
+        let mask = self.s.m.i32(0x1ff);
+        let mut culled = self.s.m.cmp(c, pred::SLT, packed, zero);
+        let mut vertices = [zero; 3];
+        for (k, vertex) in vertices.iter_mut().enumerate() {
+            let shift = self.s.m.i32(k as u32 * 10);
+            let corner = self.s.m.bin(c, Bin::LShr, packed, shift);
+            let index = self.s.m.bin(c, Bin::And, corner, mask);
+            let inside = self.s.m.cmp(c, pred::IULT, index, limit);
+            let safe = self.s.m.select(c, inside, index, zero);
+            let position = self.s.m.element(c, exports.positions, safe);
+            let components = self.s.m.load(c, position);
+            let complete = self.s.m.cmp(c, pred::EQ, components, full);
+            let valid = self.s.m.bin(c, Bin::And, inside, complete);
+            let truth = self.s.m.bool(true);
+            let invalid = self.s.m.bin(c, Bin::Xor, valid, truth);
+            culled = self.s.m.bin(c, Bin::Or, culled, invalid);
+            *vertex = index;
+        }
+        let [a, b, d] = vertices.map(|v| self.s.m.select(c, culled, zero, v));
+        self.s.op(c, "emitIndices", Attr::NoUnwind, self.s.t.void, 169, &[lane, a, b, d]);
+        self.end_guarded(at, &[]);
+        self.s.m.terminate(self.cur, Term::Ret);
+    }
+
     /// Mesh: `exp prim` as the lane's primitive. Each corner takes ten
     /// bits: a 9-bit vertex index and, above it, its edge flag (bits 9, 19
     /// and 29), which only the console's edge-flag rasterisation reads and
@@ -12324,6 +12416,12 @@ impl<'a> Lower<'a> {
         };
         let at = self.begin_guarded(guard);
         let c = self.cur;
+        if let Some(exports) = self.mesh_exports {
+            let ptr = self.s.m.element(c, exports.primitives, flat);
+            self.s.m.store(c, ptr, x);
+            self.end_guarded(at, &[]);
+            return Ok(());
+        }
         let z = self.s.m.i32(0);
         let mut culled = self.s.m.cmp(c, pred::SLT, x, z);
         // A primitive that names a vertex past the declared count, or one
@@ -12457,7 +12555,7 @@ impl<'a> Lower<'a> {
                     self.s
                         .op(self.cur, "discard", Attr::NoUnwind, self.s.t.void, 82, &[t]);
                 }
-                Term::Ret
+                self.mesh_exports.map_or(Term::Ret, |exports| Term::Br(exports.exit))
             }
             LaneExit::Indirect => return Err(unsupported(offset, "an indirect jump")),
         };
@@ -12524,7 +12622,18 @@ impl<'a> Lower<'a> {
             self.s
                 .op(a, "discard", Attr::NoUnwind, self.s.t.void, 82, &[t]);
         }
-        self.s.m.terminate(a, Term::Ret);
+        if let Some(exports) = self.mesh_exports {
+            let lane = self.mesh_thread();
+            let position = self.s.m.element(a, exports.positions, lane);
+            let zero = self.s.m.i32(0);
+            self.s.m.store(a, position, zero);
+            let indices = self.s.m.element(a, exports.primitives, lane);
+            let culled = self.s.m.i32(u32::MAX);
+            self.s.m.store(a, indices, culled);
+            self.s.m.terminate(a, Term::Br(exports.exit));
+        } else {
+            self.s.m.terminate(a, Term::Ret);
+        }
         self.abort = Some(a);
         a
     }

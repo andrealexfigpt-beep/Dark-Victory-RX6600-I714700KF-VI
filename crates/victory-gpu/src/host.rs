@@ -437,9 +437,11 @@ fn sweep() {
     let headroom = ram_headroom();
     crate::pool::room(host().and_then(|h| h.video_memory()), headroom, now);
     crate::shadow::trim_snapshots(headroom);
+    send::trim_spare(headroom);
     crate::pipeline::trim_library();
-    crate::shadow::let_go_idle();
-    crate::texture::let_go_idle();
+    crate::shadow::let_go_idle(headroom);
+    crate::texture::trim_read_scratch(headroom);
+    crate::texture::let_go_idle(headroom);
     crate::resource::let_go_idle();
 }
 
@@ -3832,6 +3834,9 @@ struct RelayFetch {
     sent: u64,
     /// Buffer, mapping, bytes.
     buffer: Option<(ID3D12Resource, usize, u64)>,
+    /// Largest fetch since the last time we checked for an oversized buffer.
+    fetch_peak: u64,
+    last_buffer_check: std::time::Instant,
     /// Pieces caught while a later flight was writing them.
     suspects: torn::Suspects,
     /// What earlier fetches brought of flights not landed yet.
@@ -4010,6 +4015,8 @@ impl RelayBack {
 /// For the frame-rate line, with [`late`]: what the line of flights did
 /// per frame since the last one.
 fn late_line(frames: f64) {
+    crate::launch::line(frames);
+    crate::port::log(frames);
     if !late() {
         return;
     }
@@ -4075,11 +4082,12 @@ fn late_line(frames: f64) {
             let t: Vec<f64> = send::STATS.iter().map(|r| r.swap(0, Ordering::Relaxed) as f64 / frames).collect();
             tracing::info!(
                 "bytes of submissions' own sent up per frame (VICTORY_SEND_OWN): {:.1} MB in {:.0} runs, {:.0} words in scatters; {:.2} ms \
-                 taking them out of the CPU sides",
+                 taking them out of the CPU sides ({:.2} ms filling the upload)",
                 t[0] / (1 << 20) as f64,
                 t[1],
                 t[2],
                 t[3] / 1000.0,
+                t[4] / 1000.0,
             );
         }
         let t: Vec<f64> = torn::STATS.iter().map(|r| r.swap(0, Ordering::Relaxed) as f64 / frames).collect();
@@ -5024,6 +5032,8 @@ impl Host {
                 event,
                 sent: 0,
                 buffer: None,
+                fetch_peak: 0,
+                last_buffer_check: std::time::Instant::now(),
                 suspects: torn::Suspects::default(),
                 had: crate::land::Had::default(),
             })
@@ -5154,9 +5164,34 @@ impl Host {
         let Some(f) = fetch.as_mut() else {
             fail(format_args!("no list, fence or event to fetch what shaders wrote to the card's memory (VICTORY_RELAY=1)"));
         };
-        if f.buffer.as_ref().is_none_or(|b| b.2 < total) {
-            let size = total.next_multiple_of(16 << 20);
-            f.buffer = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size));
+        const FETCH_STEP: u64 = 16 << 20;
+        f.fetch_peak = f.fetch_peak.max(total);
+        let keep = f.buffer.as_ref().map_or(0, |b| b.2);
+        let mut size = keep;
+        if total > keep {
+            size = total.next_multiple_of(FETCH_STEP);
+        } else if f.last_buffer_check.elapsed() >= std::time::Duration::from_secs(4) {
+            // A quiet window alone is normal. Reclaim only a material saving
+            // under pressure to avoid reallocating during brief scene changes.
+            let recent = f.fetch_peak.next_multiple_of(FETCH_STEP);
+            if recent <= keep / 2
+                && keep - recent >= 2 * FETCH_STEP
+                && ram_headroom().is_some_and(|bytes| bytes < 1 << 30)
+            {
+                size = recent;
+            }
+            f.fetch_peak = 0;
+            f.last_buffer_check = std::time::Instant::now();
+        }
+        if size != keep {
+            // The previous fetch and its CPU merge are complete. Avoid
+            // overlapping the two committed allocations at resize.
+            drop(f.buffer.take());
+            f.buffer = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size))
+                .or_else(|| self.shared_buffer(total).map(|(buffer, data)| (buffer, data as usize, total)));
+            if let Some((_, _, capacity)) = &f.buffer {
+                tracing::info!(previous_mib = keep >> 20, capacity_mib = capacity >> 20, "relay readback buffer resized");
+            }
         }
         let Some((buffer, data, _)) = f.buffer.clone() else {
             fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes, VICTORY_RELAY=1)"));
@@ -5252,14 +5287,14 @@ impl Host {
                     }
                 }
                 let mut notes = land::Notes::default();
+                let mut merged = 0;
                 for run in pieces[jobs[j].clone()].chunk_by(|a, b| std::sync::Arc::ptr_eq(&a.0, &b.0)) {
-                    let addressed: Vec<(usize, usize, usize)> =
-                        run.iter().map(|(_, lo, hi, at)| (*lo, *hi, data + *at as usize)).collect();
-                    // SAFETY: the mapping of the fetched bytes, `total` of
-                    // them; the copy into it has run, and the next waits
-                    // for this call.
-                    put.fetch_add(unsafe { run[0].0.land_card(&addressed, after, &mut notes) }, Ordering::Relaxed);
+                    let addressed = run.iter().map(|(_, lo, hi, at)| (*lo, *hi, data + *at as usize));
+                    // SAFETY: the fetch has finished and the mapping lives
+                    // until all merge jobs return.
+                    merged += unsafe { run[0].0.land_card(addressed, after, &mut notes) };
                 }
+                put.fetch_add(merged, Ordering::Relaxed);
                 notes.flush();
                 land::spent(land::stat::CARD_ALL, working);
             });
@@ -5498,7 +5533,11 @@ impl Host {
                     list.Reset(allocator, None)?;
                     #[cfg(feature = "diagnostics")]
                     pass_begin(list);
-                    for &(i, lo, hi, at) in &pieces {
+                    for run in pieces.chunk_by(|a, b| {
+                        a.0 == b.0 && a.2 == b.1 && a.3 + (a.2 - a.1) as u64 == b.3
+                    }) {
+                        let (i, lo, _, at) = run[0];
+                        let hi = run[run.len() - 1].2;
                         list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
                     }
                     #[cfg(feature = "diagnostics")]
@@ -7392,6 +7431,11 @@ impl HostList {
 
     /// The host address of the list's indirect-work budget, zeroed at each
     /// submission of the list from the first use after a reset on.
+    pub(crate) fn mesh_launch_budget(&self) -> Option<u64> {
+        self.card_budget.get_or_init(|| self.make_card_budget()).as_ref()?;
+        self.budget()
+    }
+
     pub(crate) fn budget(&self) -> Option<u64> {
         let (buffer, data) = self
             .budget
@@ -7697,6 +7741,7 @@ impl HostList {
                     batch.title_written();
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     // With the submission's one asking: the journal learns it.
+                    crate::port::copied(dst, src, len);
                     crate::watch::wrote(dst, len);
                     // What the card holds there may be another value although
                     // ours did not change.
@@ -7706,6 +7751,7 @@ impl HostList {
                     (started, len)
                 }
                 &Step::Fill(dst, src, len, _) => {
+                    crate::port::filled(src, len);
                     #[cfg(feature = "diagnostics")]
                     {
                         copies += 1;
@@ -9373,6 +9419,11 @@ impl Meter {
             #[cfg(feature = "diagnostics")]
             if !self.intervals.is_empty() {
                 let times = &mut self.intervals;
+                static SAMPLES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *SAMPLES.get_or_init(|| std::env::var_os("VICTORY_FRAME_SAMPLES").is_some_and(|v| v == "1")) {
+                    let samples: Vec<_> = times.iter().map(|t| t.as_micros() as u64).collect();
+                    tracing::info!(?samples, "native present samples (us)");
+                }
                 times.sort_unstable();
                 let count = times.len();
                 let on_time = times.partition_point(|&t| t <= std::time::Duration::from_millis(50));
@@ -10954,7 +11005,7 @@ mod refresh_tests {
                         crate::land::each(parts.len(), &|i| {
                             let mut notes = crate::land::Notes::default();
                             // SAFETY: the bytes of `now`; each piece once.
-                            unsafe { c.shadow.land_card(parts[i], after, &mut notes) };
+                            unsafe { c.shadow.land_card(parts[i].iter().copied(), after, &mut notes) };
                             notes.flush();
                         });
                         for &(from, to) in &ranges {
@@ -11258,7 +11309,7 @@ mod refresh_tests {
                             pieces.iter().map(|p| (p * PAGE + 8, (p + 1) * PAGE - 8, now.as_ptr() as usize)).collect();
                         let mut notes = crate::land::Notes::default();
                         // SAFETY: the bytes of `now`; nothing else lands here.
-                        unsafe { lands.land_card(&pieces, 0, &mut notes) };
+                        unsafe { lands.land_card(pieces.iter().copied(), 0, &mut notes) };
                         notes.flush();
                     }
                     started.elapsed().as_secs_f64() * 1e3

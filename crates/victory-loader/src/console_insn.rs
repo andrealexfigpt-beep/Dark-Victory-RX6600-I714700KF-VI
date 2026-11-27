@@ -109,15 +109,15 @@ fn clzero_stub(at: usize, stub: usize, cmp: [u8; 3]) -> Option<Vec<u8>> {
     Some(code)
 }
 
-/// Room for [`clzero_stub`]s near the title's code: where it is and the bytes used.
-static STUBS: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
+/// Executable arenas near patched code, with the bytes used in each.
+static STUBS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
 pub(crate) const STUBS_LEN: usize = 64 << 10;
 
 /// Memory for code within reach of a `jmp rel32` at `at`.
 pub(crate) fn near(at: usize) -> Option<usize> {
     use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc};
     let at = at & !0xffff;
-    (0x10_0000..0x7000_0000).step_by(0x10_0000).flat_map(|d| [at.checked_sub(d), at.checked_add(d)]).flatten().find_map(|place| {
+    (0x10_0000..0x7000_0000).step_by(0x10_0000).flat_map(|d| [at.checked_sub(d), at.checked_add(d)]).flatten().filter(|&place| place != 0).find_map(|place| {
         // SAFETY: reserves free memory at that address or fails.
         let got = unsafe { VirtualAlloc(place as *const _, STUBS_LEN, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) } as usize;
         (got != 0).then_some(got)
@@ -135,24 +135,31 @@ unsafe fn patch_clzero(at: usize, code: &[u8]) -> bool {
     let &[a, b, c, d, e, _, _, x, y, z, 0x72, 0xf4] = code else {
         return false;
     };
+    if (at & 15) + 5 > 16 {
+        return false;
+    }
+    let plan = |(place, used): (usize, usize)| {
+        let stub = place + used;
+        let jump = jump(at, stub)?;
+        let body = clzero_stub(at, stub, [x, y, z])?;
+        let next = used + body.len().next_multiple_of(16);
+        (next <= STUBS_LEN).then_some((stub, body, jump, next))
+    };
     let mut stubs = STUBS.lock().unwrap_or_else(|e| e.into_inner());
-    if stubs.is_none() {
-        *stubs = near(at).map(|place| (place, 0));
-    }
-    let Some((place, used)) = stubs.as_mut() else {
-        return false;
+    let found = stubs.iter().copied().enumerate().find_map(|(i, arena)| plan(arena).map(|layout| (i, layout)));
+    let (i, (stub, body, jump, next)) = if let Some(found) = found {
+        found
+    } else {
+        let Some(place) = near(at) else { return false };
+        let i = stubs.len();
+        stubs.push((place, 0));
+        let Some(layout) = plan((place, 0)) else { return false };
+        (i, layout)
     };
-    let stub = *place + *used;
-    let (Some(body), Some(jump)) = (clzero_stub(at, stub, [x, y, z]), jump(at, stub)) else {
-        return false;
-    };
-    if *used + body.len() > STUBS_LEN || (at & 15) + 5 > 16 {
-        return false;
-    }
     // SAFETY: inside the memory made for it, which nothing runs yet; then the title's code.
     unsafe {
         std::ptr::copy_nonoverlapping(body.as_ptr(), stub as *mut u8, body.len());
-        *used += body.len().next_multiple_of(16);
+        stubs[i].1 = next;
         patch(at, [a, b, c, d, e], jump)
     }
 }
@@ -637,7 +644,8 @@ mod tests {
                 assert_eq!(emulate(&mut context), CONTINUE_EXECUTION);
                 assert_eq!((context.Rip, context.Rax), (page as u64 + 28, first as u64 + 128));
                 if patches_clzero() {
-                    assert_eq!(*((page + 16) as *const u8), 0xe9, "a jump");
+                    let arenas = STUBS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    assert_eq!(*((page + 16) as *const u8), 0xe9, "a jump at {page:#x}, case {slot}, stub arenas {arenas:x?}");
                     block.fill(0xaa);
                     let run: extern "system" fn(usize, usize) -> usize = std::mem::transmute(page);
                     // From inside a line to inside the third: whole lines, one past the end.

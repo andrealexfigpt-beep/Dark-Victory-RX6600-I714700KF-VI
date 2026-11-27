@@ -103,7 +103,7 @@ pub fn import(name: &str, address: usize) -> usize {
     let on = crate::ab::bit("VICTORY_COPY_BESIDE").is_some() || copies_on();
     #[cfg(not(feature = "diagnostics"))]
     let on = copies_on();
-    if !on {
+    if !on && !crate::port_descriptors::on() {
         return address;
     }
     REAL[which].store(address, Relaxed);
@@ -140,7 +140,9 @@ unsafe fn copied(to: *mut u8, from: *const u8, n: usize, real: usize) -> *mut u8
     let real: Copy = unsafe { std::mem::transmute(real) };
     if n == 0 || !crate::watch::guards_any(to as usize, n) || !copies_on() || overlap(to as usize, from as usize, n) {
         // SAFETY: by the caller.
-        return unsafe { real(to, from, n) };
+        let out = unsafe { real(to, from, n) };
+        crate::port_descriptors::mark(to as u64, n);
+        return out;
     }
     let same = |at: usize, offset: usize, len: usize| {
         // SAFETY: both are the title's, the one read-only by our hand, the other read by it next.
@@ -151,6 +153,7 @@ unsafe fn copied(to: *mut u8, from: *const u8, n: usize, real: usize) -> *mut u8
         // our view of the pages.
         unsafe { real(at as *mut u8, from.add(offset), len) };
     });
+    crate::port_descriptors::mark(to as u64, n);
     to
 }
 
@@ -159,7 +162,9 @@ unsafe extern "system-unwind" fn set(to: *mut u8, byte: i32, n: usize) -> *mut u
     let real: Set = unsafe { std::mem::transmute(REAL[2].load(Relaxed)) };
     if n == 0 || !crate::watch::guards_any(to as usize, n) || !copies_on() {
         // SAFETY: the title's, as it asked for it.
-        return unsafe { real(to, byte, n) };
+        let out = unsafe { real(to, byte, n) };
+        crate::port_descriptors::mark(to as u64, n);
+        return out;
     }
     let same = |at: usize, _: usize, len: usize| {
         // SAFETY: the title's, read-only by our hand.
@@ -169,6 +174,7 @@ unsafe extern "system-unwind" fn set(to: *mut u8, byte: i32, n: usize) -> *mut u
         // SAFETY: as in `copied`.
         unsafe { real(at as *mut u8, byte, len) };
     });
+    crate::port_descriptors::mark(to as u64, n);
     to
 }
 

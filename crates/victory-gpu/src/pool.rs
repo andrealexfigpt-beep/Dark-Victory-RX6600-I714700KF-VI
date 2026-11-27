@@ -10,12 +10,12 @@
 //! forty seconds of a world without its textures.
 //! `VICTORY_TEXTURE_POOL=0` makes every one an allocation of its own again.
 //!
-//! A piece given back is used again only two seconds later (nothing the card
+//! Resident texture pieces still use a timed quarantine (nothing the card
 //! was told before that is still running: Windows resets a card that takes
 //! that long over one submission), and by then no list names it (the owners' rule, as for allocations of their own): a
 //! texture's piece comes back when the last reference to the host texture
-//! goes (an object of ours the texture holds says so), a staging buffer's
-//! when the last list that recorded its copy is reset.
+//! goes (an object of ours the texture holds says so). A staging piece can
+//! be reused as soon as the last list holding its owner is reset.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
@@ -197,11 +197,12 @@ struct Pool<B> {
     /// How many completely empty blocks to keep.
     spare: usize,
     retry_growth_at: u64,
+    needs_trim: bool,
 }
 
 impl<B: Clone> Pool<B> {
     const fn new(spare: usize) -> Pool<B> {
-        Pool { blocks: Vec::new(), resting: VecDeque::new(), spare, retry_growth_at: 0 }
+        Pool { blocks: Vec::new(), resting: VecDeque::new(), spare, retry_growth_at: 0, needs_trim: false }
     }
 
     /// A piece of `len` bytes and the memory it lies in, and whether that
@@ -300,10 +301,19 @@ impl<B: Clone> Pool<B> {
         self.resting.push_back((now + REST, piece));
     }
 
+    /// The staging owner lives in every command list that references the
+    /// upload. Its last release is the retirement point for this piece.
+    fn give_ready(&mut self, piece: Piece) {
+        let block = self.blocks[piece.block].as_mut().expect("a live staging block");
+        block.free.give(piece.start, piece.len);
+        self.needs_trim |= block.free.whole(BLOCK);
+    }
+
     fn maintain(&mut self, now: u64, spare: usize) {
         let lowered = spare < self.spare;
         self.spare = spare;
-        self.rested(now, lowered);
+        let trim = std::mem::take(&mut self.needs_trim);
+        self.rested(now, lowered || trim);
     }
 
     /// Release fully empty blocks once their last piece has rested.
@@ -368,7 +378,7 @@ pub(crate) struct StagingPiece(Piece);
 
 impl Drop for StagingPiece {
     fn drop(&mut self) {
-        lock(&STAGING).give(self.0, now());
+        lock(&STAGING).give_ready(self.0);
     }
 }
 
@@ -636,6 +646,18 @@ mod tests {
     }
 
     #[test]
+    fn retired_upload_space_can_be_reused_then_reclaimed_without_a_timer() {
+        let mut pool = Pool::new(1);
+        let (piece, _, _) = pool.take(BLOCK / 2, 512, 0, || Some(1u32)).unwrap();
+        pool.give_ready(piece);
+        let (again, block, reused) = pool.take(BLOCK / 2, 512, 0, || None).unwrap();
+        assert_eq!((again.block, again.start, block, reused), (piece.block, piece.start, 1, true));
+        pool.give_ready(again);
+        pool.maintain(0, 0);
+        assert_eq!(pool.blocks(), 0);
+    }
+
+    #[test]
     fn staging_maintenance_releases_only_empty_rested_blocks() {
         assert_eq!(staging_spares(Some(2 << 30)), 2);
         assert_eq!(staging_spares(Some(768 << 20)), 1);
@@ -755,7 +777,6 @@ mod tests {
             assert!(at.is_multiple_of(512));
             std::ptr::write_bytes(data, 0xAB, 4096);
             drop(piece);
-            lock(&STAGING).rested(u64::MAX, false);
             let (_piece, _, _, data) = staging(host, 4096, false).unwrap().unwrap();
             assert!((0..4096).all(|i| *data.add(i) == 0));
             // SAFETY: plain query.

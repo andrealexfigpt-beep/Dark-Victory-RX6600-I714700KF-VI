@@ -168,6 +168,15 @@ pub fn run(
         // SAFETY: the image stays mapped, and nothing of it has run yet.
         unsafe { victory_loader::write_sites::apply_asked(&image_name, image.base(), size) };
     }
+    if execute && victory_hle::port_descriptors::on() {
+        use victory_loader::descriptor_sites::{Hooked, SITES, apply};
+        let marks = victory_hle::port_descriptors::marks_address();
+        // SAFETY: the image is mapped and no title code has started.
+        let hooks = unsafe { apply(image.base(), image.info().size_of_image as usize, marks, &SITES) };
+        let patched = hooks.iter().filter(|hook| **hook == Hooked::Done).count();
+        victory_hle::port_descriptors::hooked(patched == SITES.len());
+        println!("descriptor record stores: {patched} of {} patched", SITES.len());
+    }
     if !execute {
         println!("not executing (pass --execute to start the title)");
         return Ok(());

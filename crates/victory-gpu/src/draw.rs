@@ -516,7 +516,7 @@ struct HeapSpan<T> {
     ends: std::collections::BTreeSet<(u64, u32)>,
 }
 
-struct HeapRanges<T> {
+pub(crate) struct HeapRanges<T> {
     slots: Vec<Option<HeapView<T>>>,
     copies: crate::host::ByCopy<HeapSpan<T>>,
     views: usize,
@@ -836,18 +836,12 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     // at best); all of them every 16 passes, because a view of a
     // released resource goes stale without a write, and a slot written
     // before its memory had a host copy is only made then.
-    type Ranges = HeapRanges<crate::shadow::Shadow>;
-    static RANGES: std::sync::Mutex<Option<std::collections::HashMap<usize, (u64, Ranges)>>> =
-        std::sync::Mutex::new(None);
-    let mut kept = RANGES.lock().unwrap_or_else(|e| e.into_inner());
-    let (passes, ranges) = kept
-        .get_or_insert_with(Default::default)
-        .entry(std::ptr::from_ref(host) as usize)
-        .or_default();
+    let mut kept = host.buffer_ranges.lock().unwrap_or_else(|e| e.into_inner());
+    let (passes, ranges) = &mut *kept;
     let changed = host.buffer_changes();
     let all = *passes == 0 || (*passes % HEAP_ROUND == 0 && !heap_spread());
     let slots = if all {
-        *ranges = Ranges::default();
+        *ranges = HeapRanges::default();
         host.buffer_slots()
     } else if heap_spread() {
         // The written ones, and this pass's part of the others.
@@ -932,10 +926,8 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     let looked = std::time::Instant::now();
     // Only copy the span of each live buffer out of the descriptor index.
     let views = ranges.views;
-    let spans: Vec<_> = ranges.spans().map(|(copy, from, to)| (copy.clone(), from, to)).collect();
-    drop(kept);
-    let bytes: u64 = spans.iter().map(|s| s.2 - s.1).sum();
-    let copies = spans.len();
+    let copies = ranges.copies.len();
+    let mut bytes = 0;
     // Memory that is not write-watched is copied whole by every refresh.
     // It was once refreshed only every 120 frames (unmapped pages read
     // one by one cost 14 GB a frame in run 11, before they were
@@ -943,33 +935,16 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     // the garbage ended runs (the card stopped answering 14-90 frames
     // into the opening cutscene; with every frame it ran on). The pass
     // costs some 30 ms a frame this way.
-    static WHOLE: std::sync::Mutex<Option<std::collections::HashMap<usize, u64>>> = std::sync::Mutex::new(None);
-    let mut whole = WHOLE.lock().unwrap_or_else(|e| e.into_inner());
-    let whole = whole.get_or_insert_with(Default::default);
-    let mut found = Vec::with_capacity(spans.len());
-    for (shadow, from, to) in spans {
-        if shadow.unwatched() {
-            // By the copy's number: a copy made where one let go was
-            // (`shadow::let_go_idle`) has never been refreshed.
-            let key = shadow.id() as usize;
-            // `VICTORY_UNWATCHED_FRAMES` sets the interval (1: every frame).
-            static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-            let every = *EVERY.get_or_init(|| {
-                std::env::var("VICTORY_UNWATCHED_FRAMES")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1)
-            });
-            match whole.get(&key) {
-                Some(&last) if frame < last + every => continue,
-                _ => {
-                    whole.insert(key, frame);
-                }
-            }
+    let mut found = Vec::with_capacity(copies);
+    for (shadow, from, to) in ranges.spans() {
+        bytes += to - from;
+        if shadow.unwatched() && !shadow.take_unwatched_refresh(frame) {
+            continue;
         }
         let end = to.min(from + shadow.left(from));
-        found.push((shadow, from, end));
+        found.push((shadow.clone(), from, end));
     }
+    drop(kept);
     #[cfg(feature = "diagnostics")]
     let refreshed = std::time::Instant::now();
     crate::watch::look_at_holes();
@@ -2238,6 +2213,7 @@ impl State {
             once!("textures picked by index: the card has no room for more; they wait");
         }
         let mut refused = 0;
+        let mut phase = crate::timeline::span("texture heap: remaps and invalidation");
         // Room again: the slots held back while the card was full are due
         // now (`full_card_pass`).
         if room {
@@ -2258,6 +2234,7 @@ impl State {
         if room {
             host.texture_slots_waiting(frame);
         }
+        phase.next("texture heap: choosing due slots");
         let baking = crate::texture::BAKING.get();
         let (mut due, census) = host.texture_slots_due(frame, if baking { 1 << 16 } else { 4096 });
         // (Those that are due later after all that are due.)
@@ -2273,6 +2250,7 @@ impl State {
         for (count, now) in HEAP_TEXTURES_QUEUE.iter().zip(census) {
             count.store(now, Ordering::Relaxed);
         }
+        phase.next("texture heap: preparing and recording uploads");
         // Where the card's memory is, and what the due slots would need
         // (`VICTORY_CARD_ACCOUNTING=1`; a line when the card first has no
         // room, and every five seconds after it).
@@ -3908,6 +3886,36 @@ impl State {
         if kind == MESH && (mesh_test() == 1 || !mesh_kept(self.pipeline)) {
             why("mesh draws are switched off (VICTORY_MESH_TEST=skip)");
             return false;
+        }
+        // The optional amplification stage reads an eligible record on the GPU
+        // at the actual draw. The ordinary clamp remains available to every
+        // pipeline, including those the driver refuses with an extra stage.
+        if kind == MESH
+            && max == 1
+            && counter.is_none()
+            && stride >= 12
+            && args.offset(arguments).is_multiple_of(4)
+            && let Some((roots, launched)) = &p.launched
+            && let Some(budget) = list.mesh_launch_budget()
+        {
+            args.refresh(list, arguments, len);
+            if !self.prepare_for(list, false, true) {
+                why("prepare failed");
+                return false;
+            }
+            // SAFETY: a live buffer kept by this recording.
+            let address = unsafe { args.buffer.GetGPUVirtualAddress() } + args.offset(arguments);
+            list.keep(&args.buffer);
+            self.mesh_scissor(list, true);
+            let recorded = crate::launch::record(list, *roots, launched, &p.pso, address, budget);
+            self.mesh_scissor(list, false);
+            if recorded {
+                self.window = None;
+                list.keep(launched);
+                self.drew(Some(p));
+                DRAWN.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
         }
         // One record without a count: clamped in a batch (`batches`).
         let batch = if batches() > 0 && max == 1 && count.is_none() {

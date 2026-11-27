@@ -733,6 +733,9 @@ pub(super) fn drain() {
 /// A submission of `lists` to queue `this`.
 pub(super) fn submit(this: This, lists: &[This]) {
     let queue = this as usize;
+    if !lists.is_empty() {
+        crate::descriptor::prefetch_heap_sync();
+    }
     if crate::list::thin::on() {
         let recordings = crate::list::thin::submitted(lists);
         if recordings.is_empty() {

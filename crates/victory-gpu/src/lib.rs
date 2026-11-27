@@ -44,6 +44,10 @@ mod book;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
+mod launch;
+#[cfg(windows)]
+pub mod port;
+#[cfg(windows)]
 mod indirect;
 #[cfg(windows)]
 mod inplace;
@@ -89,6 +93,8 @@ mod texture;
 pub mod timeline;
 #[cfg(windows)]
 pub mod titlewrite;
+#[cfg(windows)]
+pub mod port_descriptors;
 #[cfg(windows)]
 mod upload;
 #[cfg(windows)]

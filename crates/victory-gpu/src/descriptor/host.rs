@@ -202,6 +202,9 @@ pub(crate) struct HostHeap {
     /// Of those and of the slots that left the set: the ones written since
     /// [`HostHeap::buffer_changes`] last took them.
     changed: Slots,
+    /// Buffer refresh spans and pass count. Dropping the heap releases the
+    /// cached shadow references.
+    pub(crate) buffer_ranges: Mutex<(u64, crate::draw::HeapRanges<crate::shadow::Shadow>)>,
     /// Title slots holding a view of a texture the title may fill itself (a
     /// placed texture, a texture object), with the frame from which they
     /// are due: such a texture is uploaded when a draw reads it through a
@@ -526,7 +529,7 @@ pub(crate) fn read_all(start: u64) {
 pub(crate) struct Spans {
     /// When a newer view makes an older one stale.
     rule: Rule,
-    by_start: std::collections::BTreeMap<u64, (u64, std::collections::BTreeSet<u32>)>,
+    by_start: std::collections::BTreeMap<u64, PlacedSpan>,
     by_slot: std::collections::HashMap<u32, u64>,
     /// The level each slot's view starts at, and where what it is read from
     /// ends ([`Spans::shows`]).
@@ -536,6 +539,8 @@ pub(crate) struct Spans {
     /// descriptions, thousands of times a frame).
     sizes: std::collections::HashMap<[u32; 14], Option<u64>>,
 }
+
+type PlacedSpan = (u64, std::collections::BTreeSet<u32>);
 
 /// When a view the title writes makes an older view of other memory stale.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -579,14 +584,13 @@ impl Spans {
     /// end where the next one starts: the last span that starts before
     /// `start`, if it reaches past it at full size, and every span that
     /// starts inside.
-    fn overlapping(&self, start: u64, end: u64) -> Vec<u64> {
+    fn overlapping(&self, start: u64, end: u64) -> impl Iterator<Item = (&u64, &PlacedSpan)> {
         let before = self
             .by_start
             .range(..start)
             .next_back()
-            .filter(|(_, span)| span.0 > start)
-            .map(|(at, _)| *at);
-        before.into_iter().chain(self.by_start.range(start..end).map(|(at, _)| *at)).collect()
+            .filter(|(_, span)| span.0 > start);
+        before.into_iter().chain(self.by_start.range(start..end))
     }
 
     /// Slot `index` holds a view of a texture in `[start, end)`. `newer`:
@@ -611,7 +615,7 @@ impl Spans {
                 .range(start.saturating_sub(HEAD - 1)..start.saturating_add(HEAD))
                 .map(|(at, _)| *at)
                 .collect(),
-            Rule::Overlap | Rule::Never => self.overlapping(start, end),
+            Rule::Overlap | Rule::Never => self.overlapping(start, end).map(|(&at, _)| at).collect(),
         };
         let mut stale = Vec::new();
         for at in clashing {
@@ -690,13 +694,15 @@ impl Spans {
     }
 
     /// The slots whose texture's memory overlaps `[start, end)`.
-    fn slots_in(&self, start: u64, end: u64) -> Vec<u32> {
+    fn overlapping_slots(&self, start: u64, end: u64) -> impl Iterator<Item = u32> {
         self.overlapping(start, end)
-            .iter()
-            .filter_map(|at| self.by_start.get(at))
-            .flat_map(|span| span.1.iter().copied())
-            .filter(|&slot| self.reaches(slot, start))
-            .collect()
+            .flat_map(|(_, span)| span.1.iter().copied())
+            .filter(move |&slot| self.reaches(slot, start))
+    }
+
+    #[cfg(test)]
+    fn slots_in(&self, start: u64, end: u64) -> Vec<u32> {
+        self.overlapping_slots(start, end).collect()
     }
 
     /// The slots of the textures that hold bytes of `[start, end)`, for a
@@ -704,21 +710,22 @@ impl Spans {
     /// `start` itself the one before it is left out (it ends where that
     /// one starts, and a request that fills a texture begins at its first
     /// byte: `slots_in` would name its neighbour with every such write).
-    fn slots_holding(&self, start: u64, end: u64) -> Vec<u32> {
-        if end <= start {
-            return Vec::new();
-        }
-        let before = if self.by_start.contains_key(&start) {
+    fn holding_slots(&self, start: u64, end: u64) -> impl Iterator<Item = u32> {
+        let before = if end <= start || self.by_start.contains_key(&start) {
             None
         } else {
             self.by_start.range(..start).next_back().filter(|(_, span)| span.0 > start).map(|(_, span)| span)
         };
         before
             .into_iter()
-            .chain(self.by_start.range(start..end).map(|(_, span)| span))
+            .chain(self.by_start.range(start..end.max(start)).map(|(_, span)| span))
             .flat_map(|span| span.1.iter().copied())
-            .filter(|&slot| self.reaches(slot, start))
-            .collect()
+            .filter(move |&slot| self.reaches(slot, start))
+    }
+
+    #[cfg(test)]
+    fn slots_holding(&self, start: u64, end: u64) -> Vec<u32> {
+        self.holding_slots(start, end).collect()
     }
 }
 
@@ -1157,8 +1164,23 @@ impl TextureCandidates {
         if max == 0 { return Vec::new(); }
         // A retry that stays due must make progress during continuous
         // streaming. Newer writes still go first when both became due together.
-        self.retry.sort_unstable_by_key(|&(_, write, due)| (due, std::cmp::Reverse(write)));
-        self.fresh.sort_unstable_by_key(|s| s.1);
+        let retry_key = |&(_, write, due): &(u32, u64, u64)| (due, std::cmp::Reverse(write));
+        if self.retry.len() > max {
+            self.retry.select_nth_unstable_by_key(max, retry_key);
+            self.retry.truncate(max);
+        }
+        self.retry.sort_unstable_by_key(retry_key);
+        // One pass consumes at most max entries from either end of the
+        // fresh queue. Avoid sorting the backlog between those two windows.
+        let fresh_key = |&(_, write): &(u32, u64)| write;
+        let len = self.fresh.len();
+        if len > max.saturating_mul(2) {
+            let newest = len - max;
+            self.fresh.select_nth_unstable_by_key(max, fresh_key);
+            self.fresh[max..].select_nth_unstable_by_key(newest - max, fresh_key);
+            self.fresh.drain(max..newest);
+        }
+        self.fresh.sort_unstable_by_key(fresh_key);
         let mut out = Vec::with_capacity(max.min(self.retry.len() + self.fresh.len()));
         let mut retry = self.retry.into_iter();
         let mut fresh = self.fresh.into_iter();
@@ -1655,6 +1677,7 @@ impl HostHeap {
             strides,
             buffers: Slots::new(count as usize),
             changed: Slots::new(count as usize),
+            buffer_ranges: Mutex::default(),
             textures: Mutex::default(),
             tabled: (0..if sampler { 0 } else { count })
                 .map(|_| std::sync::atomic::AtomicU32::new(0))
@@ -1943,7 +1966,7 @@ impl HostHeap {
         join(&mut ranges);
         let mut slots: Vec<u32> = {
             let placed = self.placed.lock().unwrap_or_else(|e| e.into_inner());
-            ranges.iter().flat_map(|&(start, end)| placed.slots_in(start, end)).collect()
+            ranges.iter().flat_map(|&(start, end)| placed.overlapping_slots(start, end)).collect()
         };
         slots.sort_unstable();
         slots.dedup();
@@ -1993,10 +2016,13 @@ impl HostHeap {
     /// are left to their draws. Counted either way; returns how many slots
     /// it made due.
     fn texture_slots_page_written(&self, frame: u64) -> usize {
-        let ranges = std::mem::take(&mut *PAGE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut ranges = std::mem::take(&mut *PAGE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()));
         if ranges.is_empty() {
             return 0;
         }
+        // A completion burst may write adjacent parts of the same texture.
+        // Look their slots up once before invalidating them.
+        join(&mut ranges);
         self.slots_written_under(&ranges, frame, crate::watch::page_writes() & 2 != 0)[2]
     }
 
@@ -2007,7 +2033,7 @@ impl HostHeap {
         use std::sync::atomic::Ordering::Relaxed;
         let mut slots: Vec<u32> = {
             let placed = self.placed.lock().unwrap_or_else(|e| e.into_inner());
-            ranges.iter().flat_map(|&(start, end)| placed.slots_holding(start, end)).collect()
+            ranges.iter().flat_map(|&(start, end)| placed.holding_slots(start, end)).collect()
         };
         slots.sort_unstable();
         slots.dedup();
@@ -5282,6 +5308,21 @@ mod tests {
         }
         queue.written(9, 11, 11, false);
         assert_eq!(queue.due(11, 3), [(1, 1), (9, 9), (8, 8)]);
+    }
+
+    #[test]
+    fn a_bounded_texture_pass_keeps_the_order_of_a_full_pass() {
+        let mut queue = TextureQueue::default();
+        for slot in 1..=512 {
+            queue.written(slot, u64::from(slot % 13), 20, false);
+            if slot % 3 == 0 {
+                queue.later(slot, u64::from(slot), u64::from(slot % 13), 1);
+            }
+        }
+        let ordered = queue.due(20, usize::MAX);
+        for max in [0, 1, 7, 42, 170, 257, 512] {
+            assert_eq!(queue.due(20, max), ordered[..max]);
+        }
     }
 
     #[test]

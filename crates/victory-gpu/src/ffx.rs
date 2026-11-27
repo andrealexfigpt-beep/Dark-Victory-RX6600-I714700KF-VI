@@ -26,6 +26,7 @@ use crate::object::This;
 
 pub(crate) mod rgb9e5;
 mod simple;
+mod warm;
 
 type ReturnCode = u32;
 const OK: ReturnCode = 0;
@@ -317,6 +318,16 @@ pub extern "C" fn ffxCreateContext(
     let Some(mut upscale) = (unsafe { upscale_in(desc) }) else {
         return ERROR_PARAMETER;
     };
+    #[cfg(feature = "diagnostics")]
+    if std::env::var_os("VICTORY_FFX_TRACE_MODE").is_some_and(|value| value == "1") {
+        tracing::info!(
+            caller = crate::object::caller(),
+            render = ?upscale.max_render,
+            upscale = ?upscale.max_upscale,
+            flags = upscale.flags,
+            "ffx: title upscale context request"
+        );
+    }
     // The console's version and provider descriptions name console builds;
     // the PC loader picks the newest upscaler the GPU runs.
     let mut dx12 = BackendDx12 {
@@ -356,6 +367,7 @@ pub extern "C" fn ffxCreateContext(
         UPSCALE_FLAGS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(handle, upscale.flags);
     }
     let provider = if r == OK { provider_name(context) } else { String::new() };
+    warm::run(api, context, upscale, &provider);
     tracing::info!(
         render = ?upscale.max_render, upscale = ?upscale.max_upscale, flags = upscale.flags, result = r, provider,
         "ffx: upscale context on the host GPU"
@@ -413,6 +425,7 @@ pub extern "C" fn ffxDestroyContext(
             flags.remove(&handle);
         }
     }
+    warm::take_reset(context);
     // SAFETY: a context this module created.
     unsafe { (api.destroy)(context, std::ptr::null()) }
 }
@@ -631,6 +644,8 @@ pub extern "C" fn ffxDispatch(context: *mut *mut c_void, desc: *const Header) ->
         return ERROR_PARAMETER;
     }
     d.command_list = list.list.as_raw();
+    let warmed = warm::take_reset(context);
+    d.reset |= warmed;
     // SAFETY: the SDK's call on an open host list with live textures.
     #[cfg(feature = "diagnostics")]
     list.note_op(|| "FidelityFX upscale dispatch".into());
@@ -674,7 +689,7 @@ pub extern "C" fn ffxDispatch(context: *mut *mut c_void, desc: *const Header) ->
     FIRST.call_once(|| {
         // SAFETY: the destination is a live host texture.
         let format = unsafe { destination.GetDesc() }.Format.0;
-        tracing::info!(render = ?d.render_size, upscale = ?d.upscale_size, result = r, ?input, ?output, format, cpu_us, packed = packed_output.is_some(), "ffx: first upscale recorded on the host GPU");
+        tracing::info!(render = ?d.render_size, upscale = ?d.upscale_size, result = r, ?input, ?output, format, cpu_us, warmed, packed = packed_output.is_some(), "ffx: first upscale recorded on the host GPU");
     });
     r
 }

@@ -167,6 +167,14 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
     }
 }
 
+/// Something placed elsewhere (`crate::port`) in the same form: counted as
+/// [`place_for`] counts, so that [`gone`] takes it off again.
+pub(crate) fn counted(window: bool, bytes: u64) {
+    let at = if window { 0 } else { 2 };
+    STATS[at].fetch_add(1, Ordering::Relaxed);
+    STATS[at + 1].fetch_add(bytes, Ordering::Relaxed);
+}
+
 /// What [`place_for`] gave is gone.
 pub(crate) fn gone(window: bool, bytes: u64) {
     let at = if window { 0 } else { 2 };
@@ -181,6 +189,7 @@ pub(crate) fn gone(window: bool, bytes: u64) {
 /// the runtime to call before the title's own `VirtualFree` once it takes
 /// that call over.
 pub fn title_memory_freeing(at: usize, len: usize) {
+    crate::port::forget(at, len);
     if STATS[0].load(Ordering::Relaxed) + STATS[2].load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -523,6 +532,40 @@ fn cover_in(views: &BTreeMap<usize, (usize, usize, u64)>, at: usize, len: usize)
 /// [`Cover`] of `[at, at + len)` by the title's views as they are now.
 pub(crate) fn cover(at: usize, len: usize) -> Cover {
     cover_in(&views().views, at, len)
+}
+
+/// The whole stretch of views around `[at, at + len)` that follow one
+/// another in memory and in one section alike, if the range is one run of a
+/// section ([`Cover::Run`]): its first address, its bytes, the section and
+/// the offset of its first byte in it.
+pub(crate) fn stretch(at: usize, len: usize) -> Option<(usize, usize, usize, u64)> {
+    let v = views();
+    stretch_in(&v.views, at, len)
+}
+
+fn stretch_in(views: &BTreeMap<usize, (usize, usize, u64)>, at: usize, len: usize) -> Option<(usize, usize, usize, u64)> {
+    let Cover::Run(section, offset) = cover_in(views, at, len) else {
+        return None;
+    };
+    // Every view of the stretch has the same address less section offset.
+    let delta = at as i128 - offset as i128;
+    let follows = |a: usize, s: usize, o: u64| s == section && a as i128 - o as i128 == delta;
+    let (&first, &(n, _, _)) = views.range(..=at).next_back()?;
+    let mut start = first;
+    for (&a, &(n, s, o)) in views.range(..first).rev() {
+        if a + n != start || !follows(a, s, o) {
+            break;
+        }
+        start = a;
+    }
+    let mut stop = first + n;
+    for (&a, &(n, s, o)) in views.range(first + 1..) {
+        if a != stop || !follows(a, s, o) {
+            break;
+        }
+        stop = a + n;
+    }
+    Some((start, stop - start, section, (start as i128 - delta) as u64))
 }
 
 /// Another address of the title memory `[at, at + len)`, if it is a view of
@@ -1267,6 +1310,73 @@ pub(crate) fn tick() {
 
 #[cfg(test)]
 mod tests {
+    /// A stretch of a reserved section, mapped as `xmem` maps physical
+    /// pages (views of consecutive pages in turn, committed), is opened
+    /// through a view of ours: the card reads the bytes the title's views
+    /// show, at the buffer's offset, and its writes show in them; a second
+    /// buffer in the stretch is placed in the same region.
+    #[test]
+    fn warp_a_stretch_of_a_reserved_section_is_used_in_place_through_a_view_of_ours() {
+        let _turn = crate::indirect::tests::warp_turn();
+        let Some(device) = warp() else { return };
+        if windows::core::Interface::cast::<ID3D12Device13>(&device).is_err() {
+            return;
+        }
+        const K: usize = 64 << 10;
+        // SAFETY (the whole test): the section, placeholder and views made
+        // here.
+        unsafe {
+            let process = windows_sys::Win32::System::Threading::GetCurrentProcess();
+            let section = mem::CreateFileMappingW(
+                windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                mem::PAGE_READWRITE | mem::SEC_RESERVE,
+                0,
+                8 * K as u32,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            let hole = mem::VirtualAlloc2(process, std::ptr::null(), 8 * K, mem::MEM_RESERVE | mem::MEM_RESERVE_PLACEHOLDER, mem::PAGE_NOACCESS, std::ptr::null_mut(), 0)
+                .cast::<u8>();
+            assert!(!hole.is_null());
+            // Two views, pages 0..3 and 3..8 of the section, in turn.
+            mem::VirtualFree(hole.cast(), 3 * K, mem::MEM_RELEASE | mem::MEM_PRESERVE_PLACEHOLDER);
+            let mut views = Vec::new();
+            for (page, n) in [(0usize, 3usize), (3, 5)] {
+                let view = mem::MapViewOfFile3(section, process, hole.add(page * K).cast(), (page * K) as u64, n * K, mem::MEM_REPLACE_PLACEHOLDER, mem::PAGE_READWRITE, std::ptr::null_mut(), 0);
+                assert!(!view.Value.is_null(), "{}", std::io::Error::last_os_error());
+                assert!(!mem::VirtualAlloc(view.Value, n * K, mem::MEM_COMMIT, mem::PAGE_READWRITE).is_null());
+                crate::inplace::title_memory_view(view.Value as usize, n * K, section as usize, (page * K) as u64);
+                views.push(view);
+            }
+            let base = hole as u64;
+            let (start, len) = (base + K as u64 + 0x40, 5 * K as u64);
+            let placed = crate::port::place_in(&device, start, len).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+            assert_eq!(placed.bias, 0x40);
+            let mut rig = Rig::new(&device).unwrap();
+            for (i, b) in std::slice::from_raw_parts_mut(start as *mut u8, len as usize).iter_mut().enumerate() {
+                *b = (i * 7 + 3) as u8;
+            }
+            let got = rig.fetch(&placed.buffer, placed.bias, len as usize).unwrap();
+            assert!(got == std::slice::from_raw_parts(start as *const u8, len as usize), "the card reads the title's bytes, across both views");
+            rig.store(&placed.buffer, placed.bias + 3 * K as u64, &[0x5a; 256]).unwrap();
+            assert!(std::slice::from_raw_parts((start + 3 * K as u64) as *const u8, 256).iter().all(|&b| b == 0x5a), "the card's write shows in the title's view");
+            // Another buffer in the same stretch: the same region.
+            let second = crate::port::place_in(&device, base + 6 * K as u64, 100).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+            assert_eq!(second.bias, 0);
+            // The title's views may change under the heap.
+            drop((placed, second));
+            crate::port::forget(base as usize, 8 * K);
+            assert!(crate::port::place_in(&device, start, len).is_err(), "the process cannot pin a second region");
+            for view in views {
+                assert!(mem::UnmapViewOfFile2(process, view, mem::MEM_PRESERVE_PLACEHOLDER) != 0, "the title's own view can be unmapped");
+            }
+            crate::inplace::views_gone(base as usize, 8 * K);
+            mem::VirtualFree(hole.cast(), 0, mem::MEM_RELEASE);
+            mem::VirtualFree(hole.add(3 * K).cast(), 0, mem::MEM_RELEASE);
+            windows_sys::Win32::Foundation::CloseHandle(section);
+        }
+    }
     use super::*;
 
     /// Views as the runtime tells them: a range inside one view, or over
