@@ -990,6 +990,9 @@ fn create() -> windows::core::Result<Host> {
         // Initialize barrier tracker (Phase 3 Native Graphics).
         crate::host::barrier::init_barrier_tracker();
         
+        // Initialize async queue manager (Phase 3 Native Graphics).
+        crate::host::queue::init_queue_manager(&device)?;
+        
         Ok(Host {
             device,
             queue,
@@ -4185,6 +4188,7 @@ pub(crate) mod command_pool;
 pub(crate) mod descriptor_pool;
 pub(crate) mod binding;
 pub(crate) mod barrier;
+pub(crate) mod queue;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
