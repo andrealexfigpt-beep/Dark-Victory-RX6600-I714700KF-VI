@@ -104,6 +104,93 @@ impl Default for RuntimeConfig {
     }
 }
 
+impl RuntimeConfig {
+    /// Create optimal configuration for the detected hardware.
+    pub fn for_hardware(caps: &HardwareCapabilities) -> Self {
+        let mut config = Self::default();
+        
+        // Adjust based on VRAM capacity
+        let vram_gb = if caps.vram_budget > 0 { caps.vram_budget / (1024 * 1024 * 1024) } else { 0 };
+        
+        if vram_gb >= 8 {
+            // High VRAM (8GB+): aggressive caching
+            config.streaming_budget_mb = 1024;
+            config.max_background_threads = caps.cpu_logical_processors.saturating_sub(2).max(2);
+        } else if vram_gb >= 4 {
+            // Medium VRAM (4-8GB): balanced
+            config.streaming_budget_mb = 512;
+            config.max_background_threads = caps.cpu_logical_processors.saturating_sub(2).max(2);
+        } else {
+            // Low VRAM (<4GB): conservative
+            config.streaming_budget_mb = 256;
+            config.max_background_threads = caps.cpu_logical_processors.saturating_sub(1).max(1);
+        }
+        
+        // RDNA2-specific optimizations
+        if caps.is_rdna2 {
+            // Enable RDNA2-specific features
+            config.background_task_budget_ms = 12; // Slightly higher budget for async compute
+            config.profiling_interval = Duration::from_millis(50); // More frequent profiling
+        }
+        
+        // Async compute support
+        if caps.supports_async_compute {
+            config.max_background_threads += 1; // Extra thread for async compute queue
+        }
+        
+        // Mesh shader support
+        if caps.supports_mesh_shaders {
+            // Could enable mesh shader pipeline precompilation
+        }
+        
+        // Depth bounds test
+        if caps.supports_depth_bounds {
+            // Could enable depth bounds test in pipeline creation
+        }
+        
+        // Timeline semaphores
+        if caps.supports_timeline_semaphores {
+            // Could enable timeline semaphore cross-queue sync
+        }
+        
+        // CPU core count adjustments
+        if caps.cpu_logical_processors >= 12 {
+            // High-core CPU: more parallel workers
+            config.max_background_threads = caps.cpu_logical_processors / 2;
+        } else if caps.cpu_logical_processors >= 8 {
+            config.max_background_threads = caps.cpu_logical_processors - 2;
+        } else {
+            config.max_background_threads = caps.cpu_logical_processors.saturating_sub(1).max(1);
+        }
+        
+        config
+    }
+    
+    /// Create configuration for Legacy mode (maximum compatibility).
+    pub fn legacy() -> Self {
+        let mut config = Self::default();
+        config.execution_mode = ExecutionMode::Legacy;
+        config.enable_shader_cache = false;
+        config.enable_pipeline_cache = false;
+        config.enable_permutation_persistence = false;
+        config.background_task_budget_ms = 8; // Conservative budget
+        config.streaming_budget_mb = 128;
+        config.max_background_threads = 1;
+        config.profiling_interval = Duration::from_millis(500);
+        config
+    }
+    
+    /// Create configuration for Hybrid mode (native where validated).
+    pub fn hybrid() -> Self {
+        let mut config = Self::default();
+        config.execution_mode = ExecutionMode::Hybrid;
+        config.background_task_budget_ms = 12;
+        config.streaming_budget_mb = 256;
+        config.max_background_threads = 2;
+        config
+    }
+}
+
 /// Profiling data for a subsystem.
 #[derive(Debug, Default, Clone)]
 pub struct SubsystemProfile {
