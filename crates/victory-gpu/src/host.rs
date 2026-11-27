@@ -993,6 +993,9 @@ fn create() -> windows::core::Result<Host> {
         // Initialize async queue manager (Phase 3 Native Graphics).
         crate::host::queue::init_queue_manager(&device)?;
         
+        // Initialize budget-aware memory manager (Phase 3 Native Graphics).
+        crate::host::memory_mgr::init_memory_manager(&device, adapter.clone());
+        
         Ok(Host {
             device,
             queue,
@@ -4189,6 +4192,7 @@ pub(crate) mod descriptor_pool;
 pub(crate) mod binding;
 pub(crate) mod barrier;
 pub(crate) mod queue;
+pub(crate) mod memory_mgr;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
