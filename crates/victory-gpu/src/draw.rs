@@ -1978,8 +1978,6 @@ impl State {
                                 "a root SRV not on 16 bytes reads zeros"
                             );
                         }
-                            host.null_raw_at(index);
-                        }
                     }
                     None => host.null_raw_at(index),
                 }

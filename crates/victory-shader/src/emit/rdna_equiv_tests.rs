@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::{rdna, rdna_float};
+    use super::super::rdna;
 
     #[test]
     fn rdna_all_bits_is_sum_of_parts() {

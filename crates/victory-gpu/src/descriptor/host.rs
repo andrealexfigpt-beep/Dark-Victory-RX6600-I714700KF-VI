@@ -3825,7 +3825,7 @@ fn buffer_srv(
             let start = unsafe {
                 host.device
                     .CreateShaderResourceView(shadow.resource(), Some(&desc), twin);
-                unsafe { shadow.resource().GetGPUVirtualAddress() } + first * 4
+                (unsafe { shadow.resource().GetGPUVirtualAddress() }) + first * 4
             };
             if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3958,7 +3958,7 @@ fn buffer_uav(
             let start = unsafe {
                 host.device
                     .CreateUnorderedAccessView(shadow.resource(), None::<&ID3D12Resource>, Some(&desc), twin);
-                unsafe { shadow.resource().GetGPUVirtualAddress() } + first * 4
+                (unsafe { shadow.resource().GetGPUVirtualAddress() }) + first * 4
             };
             if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
