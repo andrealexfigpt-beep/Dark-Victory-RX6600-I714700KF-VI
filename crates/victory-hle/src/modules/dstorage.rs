@@ -1617,20 +1617,30 @@ fn into_destination(
         // Raw reads land through the kernel, which does not fault into the
         // GPU side's guard on title buffers; open them first, and until the
         // bytes are there.
-        let writing = victory_gpu::kernel_writing(request.destination as usize, len);
+        let at = request.destination as usize;
+        let stream = super::xmem::stream_notice().then(|| victory_gpu::stream_writing(at, len));
+        let writing = if stream.is_some() {
+            victory_gpu::stream_kernel_writing(at, len)
+        } else {
+            victory_gpu::kernel_writing(at, len)
+        };
         // SAFETY: the title's destination holds `destination_size` bytes, at
         // least `len`, and nothing else writes it until completion.
         let out = unsafe { std::slice::from_raw_parts_mut(request.destination.cast::<u8>(), len) };
-        let filled = fill(out).map(drop);
+        let filled = fill(out);
         drop(writing);
         // Again now that the bytes are there: a texture looked at in between
         // was uploaded without them (`xmem::pages_written`).
-        if super::xmem::stream_notice() {
-            victory_gpu::kernel_will_write(request.destination as usize, len);
+        let written = filled.as_ref().copied().unwrap_or(len);
+        if let Some(stream) = stream {
+            drop(stream);
+            if written != 0 {
+                victory_gpu::kernel_will_write(at, written);
+            }
         } else {
-            victory_gpu::title_memory_written(request.destination as usize, len, false);
+            victory_gpu::title_memory_written(at, written, false);
         }
-        return filled;
+        return filled.map(drop);
     }
     let offset = (request.page_offset & 0xffff) as usize;
     let list = request.destination.cast();
@@ -1668,9 +1678,11 @@ fn into_pages(
     // Consecutive pages of one allocation (the usual case): written in
     // place through one view.
     if let Some(mut window) = super::xmem::page_window(pages, offset, len) {
-        let filled = fill(window.bytes()).map(drop);
-        super::xmem::pages_written(pages, offset, len);
-        return filled;
+        let writing = super::xmem::pages_writing(pages, offset, len);
+        let filled = fill(window.bytes());
+        drop(writing);
+        super::xmem::pages_written(pages, offset, filled.as_ref().copied().unwrap_or(len));
+        return filled.map(drop);
     }
     let mut data = vec![0; len];
     let n = fill(&mut data)?;
@@ -1682,12 +1694,16 @@ fn into_pages(
     let retries = *RETRIES.get_or_init(|| {
         std::env::var("VICTORY_DSTORAGE_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(12)
     });
-    let mut written = super::xmem::write_physical(pages, offset, &data[..n]);
+    let write = || {
+        let _writing = super::xmem::pages_writing(pages, offset, n);
+        super::xmem::write_physical(pages, offset, &data[..n])
+    };
+    let mut written = write();
     let mut tries = 0;
     while !written && tries < retries {
         std::thread::sleep(std::time::Duration::from_millis((2u64 << tries.min(6)).min(128)));
         tries += 1;
-        written = super::xmem::write_physical(pages, offset, &data[..n]);
+        written = write();
     }
     if written {
         super::xmem::pages_written(pages, offset, n);

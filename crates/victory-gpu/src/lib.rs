@@ -35,6 +35,10 @@ mod draw;
 pub mod dxgi;
 pub mod fence;
 pub mod frame;
+#[cfg(windows)]
+pub mod ffx;
+#[cfg(windows)]
+mod framegen;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]
@@ -111,7 +115,8 @@ pub fn frame_phase() -> u32 {
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_section_gone, title_memory_view};
 #[cfg(windows)]
 pub use watch::{
-    kernel_writing, title_memory_allocated, title_memory_freed, title_memory_reading, title_memory_remapped,
+    kernel_writing, stream_kernel_writing, stream_writing, StreamWrite, title_memory_allocated, title_memory_freed,
+    title_memory_reading, title_memory_remapped,
     title_memory_remapping, title_memory_splitting, title_memory_unmapping, title_memory_written,
     writing as kernel_will_write,
 };

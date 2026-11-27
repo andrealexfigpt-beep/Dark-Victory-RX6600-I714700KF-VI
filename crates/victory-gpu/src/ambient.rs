@@ -112,6 +112,19 @@ fn air() -> f32 {
     })
 }
 
+/// Limit how much of the title's probe result can survive the estimate.
+/// Zero uses the estimate alone, even where the probe buffer holds old tiles.
+fn history_limit() -> f32 {
+    static LIMIT: OnceLock<f32> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("VICTORY_AMBIENT_HISTORY_LIMIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(4.0)
+    })
+}
+
 /// Strength and radius of the creases' shade.
 fn shade() -> [f32; 2] {
     static SET: OnceLock<[f32; 2]> = OnceLock::new();
@@ -298,9 +311,10 @@ void raise(uint3 at : SV_DispatchThreadID) {
         light[p] = pack(found);
         return;
     }
-    // Between the four points around, those at its own depth first; which
-    // four is dithered a little.
-    float2 g = (float2(p) + 0.5) / size * float2(PX, PY) - 0.5 + (noise - 0.5) * 0.5;
+    // Prefer the nearby probes at the pixel's depth. In the estimate-only
+    // path there is no probe history to blend the dither against.
+    float jitter = most > 0.0 ? (noise - 0.5) * 0.5 : 0.0;
+    float2 g = (float2(p) + 0.5) / size * float2(PX, PY) - 0.5 + jitter;
     int2 g0 = int2(floor(g));
     float2 f = g - float2(g0);
     float4 sr = 0, sg = 0, sb = 0;
@@ -320,6 +334,10 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
+    if (most <= 0.0) {
+        light[p] = pack(found);
+        return;
+    }
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
@@ -459,7 +477,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[6] = views.size[0];
     words[7] = views.size[1];
     words[8] = 0.04f32.to_bits();
-    words[9] = 4.0f32.to_bits();
+    words[9] = history_limit().to_bits();
     words[10] = air().to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
@@ -500,6 +518,12 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indirect_light_resolve_compiles() {
+        let code = crate::host::compile(&format!("#define RAISE\n{SOURCE}"), s!("raise"), s!("cs_5_1"));
+        assert!(code.is_ok(), "the ambient resolve shader must compile");
+    }
 
     #[test]
     fn settings() {

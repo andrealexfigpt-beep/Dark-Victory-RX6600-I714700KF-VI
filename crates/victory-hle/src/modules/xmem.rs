@@ -941,6 +941,15 @@ pub(crate) fn shown_at(pages: &[usize], offset: usize, len: usize) -> Vec<(usize
     runs
 }
 
+/// Track each title address that already maps the pages DirectStorage
+/// is about to write through its own view.
+pub(crate) fn pages_writing(pages: &[usize], offset: usize, len: usize) -> Vec<victory_gpu::StreamWrite> {
+    if !stream_notice() || len == 0 {
+        return Vec::new();
+    }
+    shown_at(pages, offset, len).into_iter().map(|(at, bytes)| victory_gpu::stream_writing(at, bytes)).collect()
+}
+
 /// DirectStorage has put bytes `[offset, offset + len)` of `pages` into
 /// memory, through a view of our own: the GPU side is told where the title
 /// sees them, so that what it copied there before they arrived (a texture

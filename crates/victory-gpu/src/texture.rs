@@ -98,6 +98,8 @@ pub(crate) struct Staging {
 #[derive(Default)]
 struct Last {
     hash: Option<Digest>,
+    /// Fingerprint of the bytes recorded for an indexed upload.
+    indexed_fingerprint: Option<u64>,
     asked: u64,
     /// Last partial read and its mapped byte count in the runtime.
     partial: Option<(u64, Option<u64>)>,
@@ -471,6 +473,15 @@ fn with_title<R>(memory: *const u8, size: usize, f: impl FnOnce(&[u8]) -> R) -> 
     })
 }
 
+/// Whether title memory changed after `after`. The journal's known answers
+/// need no page vector; only a real asking falls back to `writes`.
+fn writes_after(start: usize, end: usize, guarded: bool, after: u64) -> Option<(u64, bool)> {
+    crate::watch::known_writes_after(start, end, guarded, after).or_else(|| {
+        crate::watch::writes(start, end, guarded)
+            .map(|(now, written)| (now, written.iter().any(|&(_, write)| write > after)))
+    })
+}
+
 /// Staging buffers alive (also those only a list still holds) and their
 /// bytes.
 static STAGED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
@@ -664,6 +675,7 @@ thread_local! {
     /// that many bytes were found mapped just now (`u64::MAX`: not asked).
     pub(crate) static PICKING: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     pub(crate) static STAGING_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static SOURCE_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether a staging buffer made for one upload of a texture picked by index
@@ -804,6 +816,17 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexSkipped, 1);
         list.defer_texture(staging);
+        return;
+    }
+    if picking.is_some() && !BAKING.get() && staging.once.load(Relaxed) && !staging.prepare_indexed() {
+        list.retry_texture(level_key, first_texture.then_some(resource as usize));
+        SOURCE_DEFERRED.set(true);
+        let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = map.as_mut()
+            && map.get(&(resource as usize)).is_some_and(|current| Arc::ptr_eq(current, &staging))
+        {
+            map.remove(&(resource as usize));
+        }
         return;
     }
     #[cfg(feature = "diagnostics")]
@@ -1084,6 +1107,33 @@ pub(crate) fn card_writes(list: &HostList, resource: This, texture: &ID3D12Resou
 }
 
 impl Staging {
+    /// Read an indexed upload before recording it. The buffer can come
+    /// from the staging pool and is not valid until detiling succeeds.
+    /// The smallest mip (or the whole packed tail) must be readable; higher
+    /// mips can arrive later. A remap during the pass is retried in the queue.
+    fn prepare_indexed(&self) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.hash.is_some() {
+            return true;
+        }
+        let Some(mapping) = crate::watch::title_memory_reading_now() else {
+            return false;
+        };
+        let minimum = self.layout.bytes_from(self.mips - 1).min(self.read as u64) as usize;
+        with_indexed_snapshot(self.memory, self.read, minimum, mapping, |read| {
+            if !self.detile(read) {
+                return false;
+            }
+            let hash = digest(read);
+            last.hash = Some(hash);
+            last.indexed_fingerprint = Some(fingerprint_with(read.len(), |from, bytes| {
+                if bytes == read.len() { hash } else { digest(&read[from..from + bytes]) }
+            }));
+            true
+        })
+        .unwrap_or(false)
+    }
+
     /// Levels on demand: what says, beside the mapping, which levels of
     /// the texture are the title's now. First the lowest level a live view
     /// of the texture shows (0 without a view that says): the title's own
@@ -1194,8 +1244,8 @@ impl Staging {
         if alone && last.hash.is_some() {
             return 0;
         }
-        if !alone && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, false)) {
-            if last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked) {
+        if !alone && let Some((now, changed)) = waited(1, || writes_after(start, start + size, false, last.asked)) {
+            if last.asked != 0 && !changed {
                 return 0;
             }
             last.asked = now;
@@ -1224,10 +1274,10 @@ impl Staging {
         let mut blind = false;
         if !alone
             && *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
-            && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
+            && let Some((now, changed)) = waited(1, || writes_after(start, start + size, true, last.asked))
         {
             const HASH_EVERY: u64 = 8;
-            let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
+            let unwritten = last.asked != 0 && !changed;
             last.asked = now;
             let frame = crate::frame::current();
             let turn = frame
@@ -1414,7 +1464,7 @@ impl Staging {
     }
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
-    fn detile(&self, tiled: &[u8]) {
+    fn detile(&self, tiled: &[u8]) -> bool {
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         // Levels on demand: which levels are the title's is judged here,
         // once, for what the staging buffer holds from now on. The step
@@ -1461,9 +1511,10 @@ impl Staging {
                     .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
             {
                 tracing::warn!(?e, mip, slice, "texture not detiled");
-                return;
+                return false;
             }
         }
+        true
     }
 }
 
@@ -1477,11 +1528,60 @@ pub(crate) fn unstage(resource: This) {
     }
 }
 
-/// Where a staged title texture's memory is: address and bytes.
-pub(crate) fn staged_memory(resource: This) -> Option<(u64, u64)> {
-    let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
-    let (at, len) = map.as_ref()?.get(&(resource as usize))?.memory();
-    Some((at as u64, len as u64))
+/// Where a staged title texture's memory is and the fingerprint of its snapshot.
+pub(crate) fn staged_memory(resource: This) -> Option<(u64, u64, Option<u64>)> {
+    let staging = {
+        let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+        map.as_ref()?.get(&(resource as usize))?.clone()
+    };
+    let (at, len) = staging.memory();
+    let print = if staging.once.load(std::sync::atomic::Ordering::Relaxed) {
+        staging.last.lock().unwrap_or_else(|e| e.into_inner()).indexed_fingerprint
+    } else {
+        None
+    };
+    Some((at as u64, len as u64, print))
+}
+
+/// Snapshot the mapped bytes; a missing base mip or a short copy defers
+/// the upload. Only the copy holds the mapping guard, so detiling can run
+/// beside further remaps.
+fn with_indexed_snapshot<T>(
+    memory: *const u8,
+    size: usize,
+    minimum: usize,
+    mapping: crate::watch::Reading,
+    use_snapshot: impl FnOnce(&[u8]) -> T,
+) -> Option<T> {
+    let available = mapped_bytes(memory, size);
+    if minimum == 0 || available < minimum as u64 || !committed(memory, minimum) {
+        return None;
+    }
+    let snapshot = crate::watch::stream_snapshot(memory as usize, size)?;
+    with_read(size, |read| {
+        let got = crate::host::read_there(memory, read);
+        let current = snapshot.finish();
+        drop(mapping);
+        (current && got as u64 >= available).then(|| use_snapshot(read))
+    })
+}
+
+const FINGERPRINT_WINDOW: usize = 16 << 10;
+
+fn fingerprint_with(len: usize, mut sample: impl FnMut(usize, usize) -> Digest) -> u64 {
+    let window = FINGERPRINT_WINDOW;
+    let mut hash = 0u128;
+    let mut take = |from, bytes| {
+        hash = hash.rotate_left(37) ^ sample(from, bytes).0;
+    };
+    if len <= 3 * window {
+        take(0, len);
+    } else {
+        take(0, window);
+        take((len / 2) & !0xfff, window);
+        take(len - window, window);
+    }
+    (hash as u64 ^ (hash >> 64) as u64) | 1
 }
 
 /// A fingerprint of the title memory `[at, at + len)`, never 0: of all of
@@ -1489,30 +1589,18 @@ pub(crate) fn staged_memory(resource: This) -> Option<(u64, u64)> {
 /// (a texture streams in whole mips; the small ones lie first). Read
 /// through the kernel, so pages not there count as zeros.
 pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
-    const WINDOW: usize = 16 << 10;
     thread_local! {
         static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    let len = len as usize;
-    let mut print = 0u128;
     READ.with(|read| {
         let mut read = read.borrow_mut();
-        read.resize(3 * WINDOW, 0);
-        let mut take = |from: usize, bytes: usize| {
+        read.resize(3 * FINGERPRINT_WINDOW, 0);
+        fingerprint_with(len as usize, |from, bytes| {
             read[..bytes].fill(0);
             crate::host::copy_mapped(read.as_mut_ptr(), (at as usize + from) as *const u8, bytes, false);
-            print = print.rotate_left(37) ^ digest(&read[..bytes]).0;
-        };
-        if len <= 3 * WINDOW {
-            take(0, len);
-        } else {
-            take(0, WINDOW);
-            take((len / 2) & !0xfff, WINDOW);
-            take(len - WINDOW, WINDOW);
-        }
-    });
-    let first = (print as u64 ^ (print >> 64) as u64).to_le_bytes();
-    u64::from_le_bytes(first) | 1
+            digest(&read[..bytes])
+        })
+    })
 }
 
 /// Whether a title texture has a staging buffer: a list recorded its
@@ -1875,6 +1963,32 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
 #[cfg(test)]
 mod title_memory_tests {
     use super::with_title;
+
+    #[test]
+    fn indexed_upload_requires_the_smallest_mip_before_it_can_publish() {
+        use windows_sys::Win32::System::Memory::*;
+        const BLOCK: usize = 64 << 10;
+        // SAFETY: a private reservation with a committed head. Only the
+        // committed bytes are written in place.
+        unsafe {
+            let base = VirtualAlloc(std::ptr::null(), 2 * BLOCK, MEM_RESERVE, PAGE_NOACCESS).cast::<u8>();
+            assert!(!base.is_null());
+            assert_eq!(VirtualAlloc(base.cast(), BLOCK, MEM_COMMIT, PAGE_READWRITE), base.cast());
+            base.write_bytes(0x5a, BLOCK);
+            let absent = super::with_indexed_snapshot(
+                base, 2 * BLOCK, 2 * BLOCK, crate::watch::title_memory_reading(), |_| (),
+            );
+            assert!(absent.is_none());
+            let partial = super::with_indexed_snapshot(
+                base, 2 * BLOCK, BLOCK, crate::watch::title_memory_reading(), |bytes| {
+                    assert!(bytes[..BLOCK].iter().all(|&b| b == 0x5a));
+                    assert!(bytes[BLOCK..].iter().all(|&b| b == 0));
+                },
+            );
+            assert!(partial.is_some());
+            assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
+        }
+    }
 
     #[test]
     fn streamed_mips_wake_partial_reads_before_the_periodic_retry() {

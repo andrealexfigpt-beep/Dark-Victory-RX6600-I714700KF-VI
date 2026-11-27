@@ -1,4 +1,4 @@
-# Apply the Low 720p profile to a session copy of settings.xml.
+# Apply the Low Full HD profile to a session copy of settings.xml.
 param([Parameter(Mandatory)][string]$SettingsFile)
 
 $ErrorActionPreference = 'Stop'
@@ -7,15 +7,12 @@ $document = [System.Xml.XmlDocument]::new()
 $document.PreserveWhitespace = $true
 $document.Load($SettingsFile)
 $lowSettings = @{
-    'video/uiResolution/width' = '1280'
-    'video/uiResolution/height' = '720'
-    'video/resolutionFullscreen/width' = '1280'
-    'video/resolutionFullscreen/height' = '720'
+    'video/uiResolution/width' = '1920'
+    'video/uiResolution/height' = '1080'
+    'video/resolutionFullscreen/width' = '1920'
+    'video/resolutionFullscreen/height' = '1080'
     'advancedGraphics/damageModelsEnabled' = 'false'
-    'advancedGraphics/grassLod' = '0.350000'
-    'advancedGraphics/lodScale' = '0.650000'
     'advancedGraphics/lensFlaresScreenResDivExponent' = '3'
-    'advancedGraphics/manualMipBias' = '0.000000'
     'advancedGraphics/motionBlur' = 'false'
     'advancedGraphics/rtDynamicShadows' = 'false'
     'advancedGraphics/shadowParticleShadows' = 'false'

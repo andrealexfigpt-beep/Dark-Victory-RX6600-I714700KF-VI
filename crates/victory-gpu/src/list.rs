@@ -179,6 +179,12 @@ pub(crate) fn tables_done(lists: &[This]) {
     }
 }
 
+/// The SDK replaced the host's pipeline, root signature and descriptor heaps.
+#[cfg(windows)]
+pub(crate) fn forget_host_bindings(this: This) {
+    with_state(this, |_, state| state.forget_host());
+}
+
 /// The host list behind a title list, if there is a host GPU.
 #[cfg(windows)]
 pub(crate) fn host_list<'a>(this: This) -> Option<&'a crate::host::HostList> {

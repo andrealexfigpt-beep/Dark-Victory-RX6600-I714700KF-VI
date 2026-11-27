@@ -153,8 +153,8 @@ pub(crate) struct Shadow {
     ranged: Mutex<[(usize, usize, u64); 2]>,
     /// Whether the memory is write-watched: unknown, yes, no.
     watched: AtomicU8,
-    /// Ranges shaders of a submission not yet copied back may be writing:
-    /// title memory there is older than the copy.
+    /// Ranges shaders of a submission not yet copied back may be writing,
+    /// sorted by start and then end. Title memory there is older than the copy.
     pending: Mutex<Vec<(usize, usize)>>,
     /// With [`relay`]: how many submissions not yet copied back declared
     /// each range of `pending` ([`Flights`]). Locked inside `pending`'s
@@ -1855,7 +1855,19 @@ pub(crate) fn take_snapshots() {
 /// Split long copies into roughly MiB-sized tasks. A fixed number of
 /// workers pulls from the batch, keeping one queue entry per worker.
 fn copy_ranges_wide(copies: Vec<(usize, usize, usize)>) {
-    let mut parts = Vec::new();
+    // The batch normally contains small copies. In that case one worker was
+    // already doing all of them; use the existing descriptions directly.
+    let total: usize = copies.iter().map(|&(_, _, len)| len).sum();
+    if total <= WIDE_JOB {
+        for (src, dst, len) in copies {
+            if len != 0 {
+                // SAFETY: same disjoint destinations and live mappings as below.
+                unsafe { std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, len) };
+            }
+        }
+        return;
+    }
+    let mut parts = Vec::with_capacity(copies.len() + total / WIDE_JOB);
     let mut cuts = vec![0];
     let mut bytes = 0;
     for (src, dst, len) in copies {
@@ -3139,6 +3151,46 @@ unsafe impl Send for Shadow {}
 // SAFETY: as above.
 unsafe impl Sync for Shadow {}
 
+/// The parts of a range that have no earlier snapshot. The pending ranges
+/// are sorted and may overlap, so only the farthest covered byte matters.
+fn snapshot_gaps((mut from, to): (usize, usize), pending: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut gaps = Vec::new();
+    for &(start, end) in pending {
+        if from >= to || start >= to {
+            break;
+        }
+        if end <= from || start == end {
+            continue;
+        }
+        if start > from {
+            gaps.push((from, start));
+        }
+        from = end;
+    }
+    if from < to {
+        gaps.push((from, to));
+    }
+    gaps
+}
+
+/// With a recorded copy of the entire interval, only newer journal entries
+/// can require work. Otherwise, include pages that may have never been copied.
+fn refresh_pages(
+    mut pages: std::ops::Range<usize>,
+    written: &[(usize, u64)],
+    ranged: u64,
+) -> impl Iterator<Item = (usize, u64)> + '_ {
+    let mut writes = written.iter().copied().peekable();
+    std::iter::from_fn(move || {
+        if ranged != 0 {
+            return writes.find(|&(page, write)| write > ranged && pages.contains(&page));
+        }
+        let page = pages.next()?;
+        let write = writes.next_if(|&(written, _)| written == page).map_or(0, |(_, write)| write);
+        Some((page, write))
+    })
+}
+
 impl Shadow {
     /// The host GPU address of a title address inside the buffer.
     pub(crate) fn gpu(&self, address: u64) -> u64 {
@@ -3308,9 +3360,9 @@ impl Shadow {
             self.flights.lock().unwrap_or_else(|e| e.into_inner()).declare(range, PREPARED.load(Ordering::Relaxed));
         }
         // Dispatches declare the same ranges thousands of times.
-        if pending.contains(&range) {
+        let Err(insert_at) = pending.binary_search(&range) else {
             return;
-        }
+        };
         // Before the mutation, under `pending`'s lock: a proof that sees the
         // new epoch falls back and waits here until the range is declared.
         if crate::watch::range_proofs() {
@@ -3320,32 +3372,24 @@ impl Shadow {
         // the card (`Host::card_before` reads the declared ranges from the
         // lists).
         if self.card.is_some() {
-            pending.push(range);
+            pending.insert(insert_at, range);
             return;
         }
         // The parts no declared range holds yet: their bytes are taken now,
         // just after the range's refresh (a part declared earlier has not
         // been refreshed since, and keeps the bytes taken then).
-        let mut parts = vec![self.inside(address, len)];
-        for &(a, e) in pending.iter() {
-            let (a, e) = self.inside(a, e - a);
-            let mut rest = Vec::with_capacity(parts.len() + 1);
-            for (from, to) in parts {
-                if e <= from || a >= to {
-                    rest.push((from, to));
-                    continue;
-                }
-                if from < a {
-                    rest.push((from, a));
-                }
-                if e < to {
-                    rest.push((e, to));
-                }
-            }
-            parts = rest;
+        let start = self.start as usize;
+        let (from, to) = self.inside(address, len);
+        let mut parts = snapshot_gaps((start + from, start + to), &pending);
+        pending.insert(insert_at, range);
+        if parts.is_empty() {
+            return;
         }
-        pending.push(range);
-        let taken: usize = parts.iter().map(|&(from, to)| to.saturating_sub(from)).sum();
+        for (from, to) in &mut parts {
+            *from -= start;
+            *to -= start;
+        }
+        let taken: usize = parts.iter().map(|&(from, to)| to - from).sum();
         BACK_CLASS[usize::from(!self.window)].fetch_add(taken as u64, Ordering::Relaxed);
         let total = self.len as usize;
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
@@ -3362,9 +3406,6 @@ impl Shadow {
                 kept.0 = vec![false; self.pieces(0, total.max(1)).end];
             }
             for (from, to) in parts {
-                if from >= to {
-                    continue;
-                }
                 for piece in self.pieces(from, to) {
                     if kept.0[piece] {
                         continue;
@@ -3389,16 +3430,14 @@ impl Shadow {
             // range is done with (`copy_back_done`).
             let mut snaps = SNAPS.lock().unwrap_or_else(|e| e.into_inner());
             let (data, snapshot) = (self.data as usize, snapshot.as_mut_ptr() as usize);
-            snaps.extend(parts.into_iter().filter(|&(from, to)| from < to).map(|(from, to)| (data + from, snapshot + from, to - from)));
+            snaps.extend(parts.into_iter().map(|(from, to)| (data + from, snapshot + from, to - from)));
             return;
         }
         for (from, to) in parts {
-            if from < to {
-                // SAFETY: the copy's mapping and the snapshot's allocation
-                // (`pooled`) both hold `total` bytes, and `to <= total`.
-                unsafe {
-                    copy_wide(self.data.add(from), snapshot.as_mut_ptr().add(from), to - from);
-                }
+            // SAFETY: the copy's mapping and the snapshot's allocation
+            // (`pooled`) both hold `total` bytes, and `to <= total`.
+            unsafe {
+                copy_wide(self.data.add(from), snapshot.as_mut_ptr().add(from), to - from);
             }
         }
     }
@@ -3959,7 +3998,7 @@ impl Shadow {
         if from >= to {
             return 0;
         }
-        let mut busy: Vec<(usize, usize)> = self
+        let busy: Vec<(usize, usize)> = self
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3971,7 +4010,6 @@ impl Shadow {
             // Around ranges shaders are writing: the gaps, each as below
             // (in the world most submissions have such ranges; copying the
             // gaps whole cost ~1 s per frame).
-            busy.sort_unstable();
             let (mut at, mut bytes) = (from, 0);
             for (a, e) in busy {
                 if a > at {
@@ -4066,19 +4104,24 @@ impl Shadow {
     /// shader writes.
     fn update_free(&self, from: usize, to: usize) -> usize {
         if self.watched.load(Ordering::Relaxed) != NOT_WATCHED {
-            if let Some((now, written)) = crate::watch::writes(from, to, true) {
+            // Keep the coverage proof stable between querying the journal
+            // and advancing the copy's per-page generations.
+            let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+            let ranged = if crate::watch::light() { self.ranged(from, to) } else { 0 };
+            if let Some((now, written)) = crate::watch::writes_after(from, to, true, ranged) {
                 // (A range whose blocks rest after a write has no guard now.)
                 let guarded = crate::watch::guarded(from, to) || self.watched.load(Ordering::Relaxed) == GUARDED;
                 self.watched.store(if guarded { GUARDED } else { 1 }, Ordering::Relaxed);
-                let copied = self.copy_stale(from, to, now, &written);
+                let bytes = self.copy_stale(from..to, now, &written, ranged, &mut copied);
+                drop(copied);
                 self.refresh_check(from, to);
                 #[cfg(feature = "diagnostics")]
                 {
                     use crate::copystat::{C, add};
                     add(C::Checked, (to - from) as u64);
-                    add(C::Unchanged, (to - from).saturating_sub(copied) as u64);
+                    add(C::Unchanged, (to - from).saturating_sub(bytes) as u64);
                 }
-                return copied;
+                return bytes;
             }
             self.watched.store(NOT_WATCHED, Ordering::Relaxed);
         }
@@ -4152,28 +4195,22 @@ impl Shadow {
     /// Copies the pages of `[from, to)` written after their last copy
     /// (`written`: last writes by page, in page order; `now`: this
     /// asking), whole pages within the buffer.
-    fn copy_stale(&self, from: usize, to: usize, now: u64, written: &[(usize, u64)]) -> usize {
+    fn copy_stale(
+        &self, range: std::ops::Range<usize>, now: u64, written: &[(usize, u64)], ranged: u64, copied: &mut [u64],
+    ) -> usize {
+        let (from, to) = (range.start, range.end);
         let base = self.start as usize / PAGE;
-        let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
-        let mut writes = written.iter().peekable();
         // Pages the range holds in part are never noted in `copied`, and
         // were copied again at every refresh of the range, written or not:
         // of the heap's buffer views alone two ends for each of 4,400
         // copies, every frame. A range that was taken whole, and not written
         // since, is as it was.
-        let ranged = if crate::watch::light() { self.ranged(from, to) } else { 0 };
-        let (mut runs, mut run) = (Vec::new(), None::<(usize, bool)>);
+        let (mut runs, mut run) = (Vec::new(), None::<(usize, usize, bool)>);
         // Pages taken before and written since: in the order of their runs.
         let mut again_at: Vec<(usize, u64)> = Vec::new();
-        let last = (to - 1) / PAGE;
-        for page in from / PAGE..=last {
-            let write = match writes.peek() {
-                Some(&&(p, w)) if p == page => {
-                    writes.next();
-                    w
-                }
-                _ => 0,
-            };
+        // Cut each run to the requested bytes: a shader can write beside it.
+        let span = |first: usize, end: usize, known| ((first * PAGE).max(from), (end * PAGE).min(to), known);
+        for (page, write) in refresh_pages(from / PAGE..to.div_ceil(PAGE), written, ranged) {
             let at = &mut copied[page - base];
             let taken = (*at).max(ranged);
             if taken == 0 || write > taken {
@@ -4188,20 +4225,19 @@ impl Shadow {
                 if again {
                     again_at.push((page, taken));
                 }
-                if let Some((first, known)) = run
-                    && known != again
+                if let Some((first, end, known)) = run
+                    && (end != page || known != again)
                 {
-                    runs.push(((first * PAGE).max(from), (page * PAGE).min(to), known));
+                    runs.push(span(first, end, known));
                     run = None;
                 }
-                run.get_or_insert((page, again));
-            } else if let Some((first, known)) = run.take() {
-                runs.push(((first * PAGE).max(from), (page * PAGE).min(to), known));
+                run.get_or_insert((page, page + 1, again)).1 = page + 1;
+            } else if let Some((first, end, known)) = run.take() {
+                runs.push(span(first, end, known));
             }
         }
-        // Cut to the range: next to it shaders may be writing the copy.
-        if let Some((first, known)) = run {
-            runs.push(((first * PAGE).max(from), ((last + 1) * PAGE).min(to), known));
+        if let Some((first, end, known)) = run {
+            runs.push(span(first, end, known));
         }
         let runs = by_parts(runs, &again_at, &crate::watch::parts_written(&again_at));
         let bytes = self.take_all(runs);
@@ -4391,7 +4427,10 @@ impl Shadow {
                 crate::host::upcheck::note(self.id, a, &was, &self.card_held(a, b - a));
             });
         } else {
-            crate::host::copy_mapped(at, from as *const u8, to - from, false);
+            let len = to - from;
+            if !self.unwatched() || !crate::host::copy_mapped_stable(at, from as *const u8, len) {
+                crate::host::copy_mapped(at, from as *const u8, len, false);
+            }
         }
         // After the bytes are in: a snapshot taken meanwhile is not current.
         self.changed(from - start, to - start);
@@ -4875,6 +4914,22 @@ impl Shadow {
 
 #[cfg(test)]
 mod land_tests {
+    #[test]
+    fn ranged_refresh_only_checks_writes_newer_than_its_copy() {
+        let written = [(3, 4), (5, 11), (8, 12), (9, 10)];
+        assert_eq!(super::refresh_pages(3..10, &written, 10).collect::<Vec<_>>(), [(5, 11), (8, 12)]);
+        assert_eq!(super::refresh_pages(3..7, &written[..2], 0).collect::<Vec<_>>(), [(3, 4), (4, 0), (5, 11), (6, 0)]);
+    }
+
+    #[test]
+    fn snapshots_cover_only_gaps_between_pending_shader_writes() {
+        let pending = [(5, 14), (12, 16), (12, 19), (18, 22), (25, 25), (27, 30), (30, 33)];
+        assert_eq!(super::snapshot_gaps((10, 35), &pending), [(22, 27), (33, 35)]);
+        assert!(super::snapshot_gaps((11, 20), &pending).is_empty());
+        assert!(super::snapshot_gaps((14, 14), &pending).is_empty());
+        assert_eq!(super::snapshot_gaps((4, 10), &pending), [(4, 5)]);
+    }
+
     use super::{Card, PIECE, Shadow};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

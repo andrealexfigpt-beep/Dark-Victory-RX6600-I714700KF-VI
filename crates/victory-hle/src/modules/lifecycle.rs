@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -96,6 +96,28 @@ pub extern "system" fn UnregisterAppConstrainedChangeNotification(registration: 
 /// The window procedure a title window had before ours.
 const TITLE_PROC: PCWSTR = w!("victory.wndproc");
 
+fn borderless() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BORDERLESS").is_none_or(|v| v != "0"))
+}
+
+fn borderless_geometry(
+    parent: HWND,
+    style: u32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    enabled: bool,
+    screen: (i32, i32),
+) -> (u32, i32, i32, i32, i32) {
+    if !enabled || !parent.is_null() {
+        return (style, x, y, width, height);
+    }
+    let style = wm::WS_POPUP | style & wm::WS_VISIBLE;
+    (style, 0, 0, screen.0.max(1), screen.1.max(1))
+}
+
 pub extern "system" fn CreateWindowExW(
     ex_style: u32,
     class: PCWSTR,
@@ -111,6 +133,8 @@ pub extern "system" fn CreateWindowExW(
     param: *const c_void,
 ) -> HWND {
     let (x, y, width, height) = fit(parent, x, y, width, height);
+    let screen = unsafe { (wm::GetSystemMetrics(wm::SM_CXSCREEN), wm::GetSystemMetrics(wm::SM_CYSCREEN)) };
+    let (style, x, y, width, height) = borderless_geometry(parent, style, x, y, width, height, borderless(), screen);
     // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
         wm::CreateWindowExW(
@@ -137,6 +161,8 @@ pub extern "system" fn CreateWindowExA(
     param: *const c_void,
 ) -> HWND {
     let (x, y, width, height) = fit(parent, x, y, width, height);
+    let screen = unsafe { (wm::GetSystemMetrics(wm::SM_CXSCREEN), wm::GetSystemMetrics(wm::SM_CYSCREEN)) };
+    let (style, x, y, width, height) = borderless_geometry(parent, style, x, y, width, height, borderless(), screen);
     // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
         wm::CreateWindowExA(
@@ -532,6 +558,24 @@ mod tests {
         ] {
             assert_eq!(parse_window_limit(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn borderless_geometry_only_changes_top_level_windows_when_enabled() {
+        let null = std::ptr::null_mut();
+        let child = 1isize as HWND;
+        let original = (wm::WS_OVERLAPPEDWINDOW, 10, 20, 1280, 720);
+        assert_eq!(borderless_geometry(null, original.0, original.1, original.2, original.3, original.4, false, (1920, 1080)), original);
+        assert_eq!(borderless_geometry(child, original.0, original.1, original.2, original.3, original.4, true, (1920, 1080)), original);
+        let visible = original.0 | wm::WS_VISIBLE;
+        assert_eq!(
+            borderless_geometry(null, visible, original.1, original.2, original.3, original.4, true, (2560, 1440)),
+            (wm::WS_POPUP | wm::WS_VISIBLE, 0, 0, 2560, 1440)
+        );
+        assert_eq!(
+            borderless_geometry(null, original.0, original.1, original.2, original.3, original.4, true, (0, 0)),
+            (wm::WS_POPUP, 0, 0, 1, 1)
+        );
     }
 
     #[test]

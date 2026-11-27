@@ -1182,6 +1182,75 @@ mod tests {
     }
 
     #[test]
+    fn stable_large_copy_matches_sparse_copy_and_refuses_holes() {
+        use windows_sys::Win32::System::Memory::*;
+        const SIZE: usize = 6 << 20;
+        const HEAD: usize = (4 << 20) + 8192;
+        // SAFETY: a private reservation; only committed pages are accessed.
+        unsafe {
+            let base = VirtualAlloc(std::ptr::null(), SIZE, MEM_RESERVE, PAGE_NOACCESS).cast::<u8>();
+            assert!(!base.is_null());
+            assert!(!VirtualAlloc(base.cast(), HEAD, MEM_COMMIT, PAGE_READWRITE).is_null());
+            for (i, byte) in std::slice::from_raw_parts_mut(base, HEAD).iter_mut().enumerate() {
+                *byte = (i.wrapping_mul(37) ^ (i >> 9)) as u8;
+            }
+            let mut fast = vec![0u8; HEAD + 127];
+            let copy = HEAD - 13;
+            assert!(crate::watch::title_memory_reading_now().is_some());
+            assert!(crate::texture::committed(base.add(13), copy));
+            assert!(super::copy_mapped_stable(fast.as_mut_ptr().add(13), base.add(13), copy));
+            assert_eq!(&fast[13..HEAD], std::slice::from_raw_parts(base.add(13), copy));
+            assert!(fast[..13].iter().chain(&fast[HEAD..]).all(|&b| b == 0));
+
+            let mut refused = vec![0x5a; SIZE];
+            assert!(!super::copy_mapped_stable(refused.as_mut_ptr(), base, SIZE));
+            assert!(refused.iter().all(|&b| b == 0x5a));
+
+            let mut sparse = vec![0u8; SIZE];
+            super::copy_mapped(sparse.as_mut_ptr(), base, SIZE, false);
+            assert_eq!(&sparse[..HEAD], std::slice::from_raw_parts(base, HEAD));
+            assert!(sparse[HEAD..].iter().all(|&b| b == 0));
+            assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn stable_large_copy_cost() {
+        use windows_sys::Win32::System::Memory::*;
+        const SIZE: usize = 0x141_2200;
+        const RUNS: usize = 40;
+        // SAFETY: a private committed allocation, released below.
+        unsafe {
+            let base = VirtualAlloc(std::ptr::null(), SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE).cast::<u8>();
+            assert!(!base.is_null());
+            std::ptr::write_bytes(base, 0x5a, SIZE);
+            let mut out = vec![0u8; SIZE];
+            for _ in 0..5 {
+                super::copy_mapped(out.as_mut_ptr(), base, SIZE, false);
+                assert!(super::copy_mapped_stable(out.as_mut_ptr(), base, SIZE));
+            }
+            let began = std::time::Instant::now();
+            for _ in 0..RUNS {
+                super::copy_mapped(std::hint::black_box(out.as_mut_ptr()), std::hint::black_box(base), SIZE, false);
+            }
+            let safe = began.elapsed().as_secs_f64() * 1000.0 / RUNS as f64;
+            let began = std::time::Instant::now();
+            for _ in 0..RUNS {
+                assert!(super::copy_mapped_stable(
+                    std::hint::black_box(out.as_mut_ptr()),
+                    std::hint::black_box(base),
+                    SIZE
+                ));
+            }
+            let stable = began.elapsed().as_secs_f64() * 1000.0 / RUNS as f64;
+            std::hint::black_box(&out);
+            println!("large copy {SIZE} bytes: safecopy {safe:.3} ms, stable {stable:.3} ms");
+            assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
+        }
+    }
+
+    #[test]
     fn sparse_copies_preserve_islands_and_observe_remaps() {
         use windows_sys::Win32::System::Memory::*;
         const N: usize = 5 << 16;
@@ -2596,6 +2665,7 @@ enum Step {
 /// the upload buffers its GPU commands read, kept until the list is reset.
 #[derive(Default)]
 struct Deferred {
+    framegen: Option<crate::framegen::Inputs>,
     /// Destination, source, bytes.
     copies: Vec<Step>,
     uploads: Vec<ID3D12Resource>,
@@ -2891,8 +2961,8 @@ fn landable(line: &[Option<u64>], completed: u64) -> usize {
 /// 64 KiB piece; the compare hashes the whole piece for each and stores
 /// the hash, so the second of them may find it stored already and not
 /// flag it.
-fn flagged_pieces(flags: &[(usize, u32, bool)]) -> Vec<(usize, u32)> {
-    let mut pieces: Vec<(usize, u32)> = flags.iter().filter(|f| f.2).map(|f| (f.0, f.1)).collect();
+fn flagged_pieces(flags: impl Iterator<Item = (usize, u32, bool)>) -> Vec<(usize, u32)> {
+    let mut pieces: Vec<(usize, u32)> = flags.filter(|f| f.2).map(|f| (f.0, f.1)).collect();
     pieces.sort_unstable();
     pieces.dedup();
     pieces
@@ -2930,7 +3000,7 @@ mod relay_tests {
         // Copy a: piece 3 under two ranges, flagged under the first only;
         // piece 4 not flagged; copy b: piece 3 not flagged, piece 9 flagged.
         let flags = [(a, 3, true), (a, 4, false), (a, 3, false), (b, 3, false), (b, 9, true)];
-        let fetch = flagged_pieces(&flags);
+        let fetch = flagged_pieces(flags.into_iter());
         assert!(fetch.contains(&(a, 3)));
         assert!(!fetch.contains(&(a, 4)));
         assert!(!fetch.contains(&(b, 3)));
@@ -3370,6 +3440,20 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
 }
 
 type RefreshSpan = (std::sync::Arc<crate::shadow::Shadow>, usize, usize);
+
+fn framegen_submitted(runs: &[&HostList]) {
+    if crate::framegen::enabled() {
+        let mut latest = None;
+        for list in runs {
+            if let Some(input) = list.deferred().framegen.take() {
+                latest = Some(input);
+            }
+        }
+        if let Some(input) = latest {
+            crate::framegen::submitted(input);
+        }
+    }
+}
 type StaleSpan<'a> = (&'a crate::shadow::Shadow, usize, usize);
 
 /// Immutable list metadata shared by the submission's write-watch query and
@@ -4980,7 +5064,7 @@ impl Host {
             let mut seen = std::collections::HashSet::new();
             for &(plan, behind) in plans {
                 plan.picked_found(differs);
-                let flags: Vec<(usize, u32, bool)> = plan
+                let flags = plan
                     .ranges
                     .iter()
                     .filter(|r| !r.picked)
@@ -4990,18 +5074,17 @@ impl Host {
                             let wanted = suspects.map_or(flagged, |s| s.wanted((r.shadow.id(), r.span.first + p), flagged));
                             (std::sync::Arc::as_ptr(&r.shadow) as usize, r.span.first + p, wanted)
                         })
-                    })
-                    .collect();
-                let fetched = flagged_pieces(&flags);
+                    });
+                let fetched = flagged_pieces(flags);
                 for r in plan.ranges.iter().filter(|r| !r.picked) {
                     let copy = std::sync::Arc::as_ptr(&r.shadow) as usize;
                     if upcheck::on() {
                         upcheck::declared(r.shadow.id(), r.span.from as usize, r.span.to as usize);
                     }
-                    for p in 0..r.span.pieces {
-                        if fetched.binary_search(&(copy, r.span.first + p)).is_err() {
-                            continue;
-                        }
+                    let start = fetched.partition_point(|&key| key < (copy, r.span.first));
+                    let end = (copy, r.span.first + r.span.pieces);
+                    for &(_, piece) in fetched[start..].iter().take_while(|&&key| key < end) {
+                        let p = piece - r.span.first;
                         let (lo, hi) = r.shadow.card_piece(&r.span, p);
                         if lo < hi && !seen.contains(&(copy, lo, hi)) {
                             let key = (r.shadow.id(), r.shadow.span().0 as usize + lo, hi - lo);
@@ -5097,8 +5180,14 @@ impl Host {
                 list.Reset(&allocator, None)?;
                 #[cfg(feature = "diagnostics")]
                 pass_begin_on(&list, copy_queue.is_some());
-                for (shadow, lo, hi, at) in check.as_ref().map_or(&pieces, |c| &c.copies) {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
+                let copies = check.as_ref().map_or(&pieces, |c| &c.copies);
+                // Coalesce consecutive commands only when both sides are contiguous.
+                for run in copies.chunk_by(|a, b| {
+                    std::sync::Arc::ptr_eq(&a.0, &b.0) && a.2 == b.1 && a.3 + (a.2 - a.1) as u64 == b.3
+                }) {
+                    let (shadow, lo, _, at) = &run[0];
+                    let hi = run[run.len() - 1].2;
+                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (hi - *lo) as u64);
                 }
                 #[cfg(feature = "diagnostics")]
                 pass_end(&list);
@@ -6079,6 +6168,7 @@ impl Host {
             if let Err(e) = signalled {
                 fail(format_args!("a submission sent ahead could not be followed by a signal ({e})"));
             }
+            framegen_submitted(runs);
             self.retire_state_preludes(*submitted, preludes);
             #[cfg(feature = "diagnostics")]
             split.part(5);
@@ -6123,6 +6213,9 @@ impl Host {
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
                 self.queue.ExecuteCommandLists(group);
+                if i + 1 == groups.len() {
+                    framegen_submitted(runs);
+                }
                 self.card_sent();
                 let waited = self
                     .queue
@@ -6692,7 +6785,7 @@ impl HostList {
     /// as [`HostList::transition`] does a title resource's host copy, and
     /// records the barrier: for textures that are not a title resource's
     /// host copy (colour twins) and for the copies between the two.
-    fn settle(&self, copy: &std::sync::Arc<crate::resource::HostTexture>, wanted: u32) {
+    pub(crate) fn settle(&self, copy: &std::sync::Arc<crate::resource::HostTexture>, wanted: u32) {
         let wanted = legal_for(copy.flags(), wanted);
         self.changed_something();
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
@@ -7112,6 +7205,10 @@ impl HostList {
 
     fn deferred(&self) -> std::sync::MutexGuard<'_, Deferred> {
         self.deferred.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn framegen_input(&self, input: crate::framegen::Inputs) {
+        self.deferred().framegen = Some(input);
     }
 
     /// Copies `len` bytes from `src` to `dst` when the list is submitted.
@@ -8171,6 +8268,11 @@ fn wide_textures() -> bool {
 }
 
 impl Batch {
+    // Most checks skip the refresh. Giving a worker several at a time also
+    // avoids updating the shared work index and skip counter for each one.
+    const REFRESH_GROUP: usize = 16;
+    const REFRESH_PARALLEL_FILTER: usize = 256;
+
     fn add(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>, address: usize, len: usize) {
         let end = address + len;
         let key = std::sync::Arc::as_ptr(shadow) as usize;
@@ -8231,6 +8333,27 @@ impl Batch {
         PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
     }
 
+    fn refresh_group(refreshes: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)], group: usize, width: usize) {
+        let from = group * width;
+        let to = (from + width).min(refreshes.len());
+        #[cfg(feature = "diagnostics")]
+        let mut skipped = 0;
+        for (shadow, from, to) in &refreshes[from..to] {
+            if width > 1 && shadow.nothing_new(*from, *to - *from) {
+                #[cfg(feature = "diagnostics")]
+                {
+                    skipped += 1;
+                }
+            } else {
+                Self::update(shadow, *from, *to);
+            }
+        }
+        #[cfg(feature = "diagnostics")]
+        if skipped != 0 {
+            FLUSHES[2].fetch_add(skipped, Ordering::Relaxed);
+        }
+    }
+
     /// Whether `staging` is still to be refreshed in this submission (and
     /// notes it refreshed).
     fn texture_due<T>(&mut self, staging: &std::sync::Arc<T>) -> bool {
@@ -8285,10 +8408,9 @@ impl Batch {
         let before = [0, 2].map(|i| PREPARING[i].load(Ordering::Relaxed));
         // Those known to copy nothing are said so here, unless they are very
         // many: then beside the others.
-        const FEW: usize = 256;
         let mut spans = spans;
-        let many = spans.len() > FEW;
-        if !many {
+        let width = if spans.len() > Self::REFRESH_PARALLEL_FILTER { Self::REFRESH_GROUP } else { 1 };
+        if width == 1 {
             #[cfg(feature = "diagnostics")]
             let all = spans.len();
             spans.retain(|(shadow, from, to)| !shadow.nothing_new(*from, *to - *from));
@@ -8302,19 +8424,13 @@ impl Batch {
         }
         #[cfg(feature = "diagnostics")]
         FLUSHES[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
-        crate::shadow::wide_each(spans.len() + due.len(), move |i| {
+        crate::shadow::wide_each(spans.len().div_ceil(width) + due.len(), move |i| {
             // The textures first: they are the longer pieces.
             let Some(i) = i.checked_sub(due.len()) else {
                 due[i].refresh();
                 return;
             };
-            let (shadow, from, to) = &spans[i];
-            if many && shadow.nothing_new(*from, *to - *from) {
-                #[cfg(feature = "diagnostics")]
-                FLUSHES[2].fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            Self::update(shadow, *from, *to);
+            Self::refresh_group(&spans, i, width);
         });
         if ahead {
             crate::watch::ask_ahead_done();
@@ -8444,9 +8560,9 @@ impl Batch {
         // from what the submission's asking found, before anything is asked
         // and any thread woken. (Thousands of them, the heap's buffer views
         // once a frame: on the threads, below.)
-        const FEW: usize = 256;
         let light = crate::watch::light();
-        if light && self.refreshes.len() <= FEW {
+        let width = if self.refreshes.len() > Self::REFRESH_PARALLEL_FILTER { Self::REFRESH_GROUP } else { 1 };
+        if light && width == 1 {
             let started = std::time::Instant::now();
             #[cfg(feature = "diagnostics")]
             let all = self.refreshes.len();
@@ -8480,14 +8596,8 @@ impl Batch {
             if light {
                 // A number to a free thread, not a job to each copy.
                 let refreshes = std::mem::take(&mut self.refreshes);
-                crate::shadow::wide_each(refreshes.len(), move |i| {
-                    let (shadow, from, to) = &refreshes[i];
-                    if refreshes.len() > FEW && shadow.nothing_new(*from, *to - *from) {
-                        #[cfg(feature = "diagnostics")]
-                        FLUSHES[2].fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                    Self::update(shadow, *from, *to);
+                crate::shadow::wide_each(refreshes.len().div_ceil(width), move |i| {
+                    Self::refresh_group(&refreshes, i, width);
                 });
             } else {
                 let jobs: Vec<Box<dyn FnOnce() + Send>> = self
@@ -8508,6 +8618,43 @@ impl Batch {
             crate::watch::ask_ahead_done();
         }
     }
+}
+
+/// Copies a large, wholly mapped source range with the platform's optimized
+/// `memcpy` while the runtime is kept from remapping it. False leaves the
+/// destination untouched so the caller can use [`copy_mapped`]'s sparse read.
+pub(crate) fn copy_mapped_stable(dst: *mut u8, src: *const u8, len: usize) -> bool {
+    const MIN: usize = 4 << 20;
+    if len < MIN {
+        return false;
+    }
+    #[cfg(feature = "diagnostics")]
+    if crate::copystat::mode() != 0 {
+        return false;
+    }
+    let Some(_mapping) = crate::watch::title_memory_reading_now() else {
+        return false;
+    };
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_MAPPED, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    // SAFETY: a plain query of the source's first page.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let queried = unsafe { VirtualQuery(src.cast(), &mut info, size_of_val(&info)) };
+    let region_end = (info.BaseAddress as usize).saturating_add(info.RegionSize);
+    let covers = region_end.saturating_sub(src as usize) >= len;
+    let readable = info.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0;
+    if queried != size_of_val(&info)
+        || !matches!(info.State, MEM_COMMIT | MEM_MAPPED)
+        || !covers
+        || !readable
+    {
+        return false;
+    }
+    // SAFETY: the caller's destination is mapped and does not overlap the
+    // source; the read guard keeps every source page mapped and readable.
+    unsafe { std::ptr::copy_nonoverlapping(src, dst, len) };
+    true
 }
 
 /// Copies title memory at submission. The ranges were checked against their
@@ -8935,11 +9082,20 @@ fn swap_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
 
 const BUFFERS: u32 = 2;
 
+#[repr(C)]
+struct TearingSupport {
+    allow: windows::core::BOOL,
+}
+
 struct Presenter {
+    framegen: Option<crate::framegen::Presentation>,
+    framegen_plane: Option<crate::compose::Composer>,
+    framegen_ui: Option<ID3D12Resource>,
     swap_chain: IDXGISwapChain3,
     width: u32,
     height: u32,
     format: DXGI_FORMAT,
+    tearing: bool,
     copy: HostList,
     /// With presents sent ahead ([`late_free_present`]): a list for each
     /// present in the air, and the submission it last flew as (it is used
@@ -8996,6 +9152,10 @@ pub fn dispatch_fullscreen_message(hwnd: *mut std::ffi::c_void, message: u32) ->
 }
 
 impl Presenter {
+    fn swap_flags(&self) -> DXGI_SWAP_CHAIN_FLAG {
+        if self.tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING } else { DXGI_SWAP_CHAIN_FLAG(0) }
+    }
+
     /// Returns false only while the window thread is changing display mode.
     fn request_fullscreen(&mut self) -> bool {
         if let Some(pending) = &self.fullscreen_pending {
@@ -9443,18 +9603,23 @@ impl Host {
         if p.fullscreen_needs_resize || (p.width, p.height, p.format) != (width, height, format) {
             // Presents sent ahead hold back buffers until they have run.
             settle_now(WHY_SYNC);
+            if let Some(fg) = &mut p.framegen {
+                fg.disable(&p.swap_chain);
+            }
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
-                    .ResizeBuffers(BUFFERS, width, height, format, DXGI_SWAP_CHAIN_FLAG(0))
+                    .ResizeBuffers(BUFFERS, width, height, format, p.swap_flags())
             };
             match resized {
                 Ok(()) => {
+                    p.framegen_plane = None;
+                    p.framegen_ui = None;
                     if p.format != format {
                         p.composer = None;
                     }
                     if std::mem::take(&mut p.fullscreen_needs_resize) {
-                        tracing::info!(width, height, "DXGI fullscreen active; Present uses sync interval 0");
+                        tracing::info!(width, height, tearing = p.tearing, "DXGI fullscreen active; Present uses sync interval 0");
                     }
                     (p.width, p.height, p.format) = (width, height, format);
                     tracing::info!(
@@ -9514,6 +9679,23 @@ impl Host {
             copy.reset();
             copy.keep(texture);
             let list = &copy.list;
+            let separate_ui = p.framegen.as_ref().is_some_and(|fg| {
+                if planes.is_some() {
+                    if p.framegen_plane.is_none() {
+                        p.framegen_plane = crate::compose::Composer::single_plane(self, format).ok();
+                    }
+                    if p.framegen_ui.is_none() {
+                        let mut desc = back.GetDesc();
+                        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+                        let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+                        let _ = self.device.CreateCommittedResource(
+                            &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut p.framegen_ui,
+                        );
+                    }
+                }
+                let ui = p.framegen_ui.as_ref().filter(|_| planes.is_some() && p.framegen_plane.is_some());
+                fg.register_ui(ui, [width, height]) && ui.is_some()
+            });
             let composed = if let Some((over, over_state, base_fmt, over_fmt)) = planes {
                 copy.keep(over);
                 if let Some(composer) = p.composer.as_mut() {
@@ -9527,14 +9709,26 @@ impl Host {
                     pre.push(transition(&back, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
                     list.ResourceBarrier(&pre);
                     let compose_slot = slot.map_or(0, |i| i + 1);
-                    if let Err(err) = composer.record(
+                    let record = if separate_ui
+                        && let (Some(plane), Some(ui)) = (&mut p.framegen_plane, &p.framegen_ui)
+                    {
+                        copy.keep(ui);
+                        list.ResourceBarrier(&[transition(ui, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
+                        let result = plane.record(self, 2 * compose_slot, list, [(texture, base_fmt); 2], &back, (width, height))
+                            .and_then(|()| plane.record(self, 2 * compose_slot + 1, list, [(over, over_fmt); 2], ui, (width, height)));
+                        list.ResourceBarrier(&[transition(ui, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON)]);
+                        result
+                    } else {
+                        composer.record(
                         self,
                         compose_slot,
                         list,
                         [(texture, base_fmt), (over, over_fmt)],
                         &back,
                         (width, height),
-                    ) {
+                        )
+                    };
+                    if let Err(err) = record {
                         copy.close();
                         drop(back);
                         drop(presenter);
@@ -9640,6 +9834,9 @@ impl Host {
                 ));
                 list.ResourceBarrier(&post);
             }
+            let generated = p.framegen.as_mut().is_some_and(|fg|
+                fg.prepare(&p.swap_chain, &self.device, copy, [width, height], frame)
+            );
             copy.close();
             let flown = match slot {
                 Some(i) => {
@@ -9665,7 +9862,21 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let flags = if p.tearing && !p.fullscreen_requested && p.framegen.is_none() {
+                DXGI_PRESENT_ALLOW_TEARING
+            } else {
+                DXGI_PRESENT(0)
+            };
+            let begin = generated.then(std::time::Instant::now);
+            let presented = p.swap_chain.Present(u32::from(generated), flags);
+            if generated && let Some(fg) = &mut p.framegen {
+                if presented.is_ok() {
+                    fg.presented(&p.swap_chain, frame, begin.map_or(0, |at| at.elapsed().as_micros() as u64));
+                } else {
+                    tracing::warn!(?presented, frame, "FidelityFX present failed");
+                    fg.disable(&p.swap_chain);
+                }
+            }
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
@@ -9692,6 +9903,21 @@ impl Host {
         // SAFETY: plain object creation for our window.
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let tearing = factory
+                .cast::<IDXGIFactory5>()
+                .ok()
+                .and_then(|factory| {
+                    let mut support = TearingSupport { allow: windows::core::BOOL(0) };
+                    factory
+                        .CheckFeatureSupport(
+                            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                            (&raw mut support).cast(),
+                            std::mem::size_of_val(&support) as u32,
+                        )
+                        .ok()?;
+                    Some(support.allow.as_bool())
+                })
+                .unwrap_or(false);
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -9703,20 +9929,29 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: BUFFERS,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                Flags: if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32 } else { 0 },
                 ..Default::default()
             };
-            let swap_chain = factory
-                .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
-                .cast::<IDXGISwapChain3>()?;
+            let proxy = (!crate::switch::on("VICTORY_FULLSCREEN") && crate::ffx::framegen_enabled())
+                .then(|| crate::framegen::Presentation::create(&factory, &self.queue, hwnd, &desc))
+                .flatten();
+            let (swap_chain, framegen) = match proxy {
+                Some((chain, fg)) => (chain, Some(fg)),
+                None => (factory.CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?.cast::<IDXGISwapChain3>()?, None),
+            };
             let copy = self.new_list()?;
             copy.close();
-            tracing::info!(width, height, format = format.0, "presenting to a window");
+            tracing::info!(width, height, format = format.0, tearing, "presenting to a window");
             self.log_video_memory("right after the swap chain is made");
             Ok(Presenter {
+                framegen,
+                framegen_plane: None,
+                framegen_ui: None,
                 swap_chain,
                 width,
                 height,
                 format,
+                tearing,
                 copy,
                 ahead: Vec::new(),
                 fullscreen_retry_at: crate::switch::on("VICTORY_FULLSCREEN").then(std::time::Instant::now),
@@ -10211,6 +10446,14 @@ extern "system" fn window_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+fn window_geometry(width: u32, height: u32, borderless: bool, screen: (i32, i32)) -> (WINDOW_STYLE, i32, i32, i32, i32) {
+    if borderless {
+        (WS_POPUP | WS_VISIBLE, 0, 0, screen.0.max(1), screen.1.max(1))
+    } else {
+        (WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, width as i32, height as i32)
+    }
+}
+
 fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
     const CLASS: PCWSTR = w!("VIctory");
     // SAFETY: registers our class once and creates a window of it.
@@ -10225,22 +10468,25 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             ..Default::default()
         };
         RegisterClassExW(&class);
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: width as i32,
-            bottom: height as i32,
-        };
-        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
+        let borderless = crate::toggled!("VICTORY_BORDERLESS");
+        let screen = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        let (style, x, y, mut w, mut h) = window_geometry(width, height, borderless, screen);
+        if !borderless {
+            let mut rect = RECT { left: 0, top: 0, right: w, bottom: h };
+            AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
+            w = rect.right - rect.left;
+            h = rect.bottom - rect.top;
+        }
+        tracing::info!(borderless, width = w, height = h, x, y, "host window created");
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
             w!("VIctory"),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
+            style,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             Some(instance.into()),
@@ -10257,6 +10503,22 @@ fn pump() {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn borderless_geometry_covers_the_screen_without_frame_controls() {
+        let (style, x, y, w, h) = window_geometry(1920, 1080, true, (2560, 1440));
+        assert_eq!(style, WS_POPUP | WS_VISIBLE);
+        assert_eq!((x, y, w, h), (0, 0, 2560, 1440));
+        let (style, x, y, w, h) = window_geometry(1920, 1080, false, (2560, 1440));
+        assert_eq!(style, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        assert_eq!((x, y), (CW_USEDEFAULT, CW_USEDEFAULT));
+        assert_eq!((w, h), (1920, 1080));
     }
 }
 

@@ -74,10 +74,34 @@ impl Journal {
         index > 0 && last <= ranges[index - 1].1
     }
 
+    fn all_recent(&self, first: usize, last: usize, after: u64, mut test: impl FnMut(usize, u64) -> bool) -> bool {
+        let mut check = |start, end| {
+            self.written.range(start..end).all(|(&page, &write)| write <= after || test(page, write))
+        };
+        if first >= last {
+            return true;
+        }
+        if after == 0 || last - first <= JOURNAL_REGION_PAGES {
+            return check(first, last);
+        }
+        self.latest.range(first / JOURNAL_REGION_PAGES..=(last - 1) / JOURNAL_REGION_PAGES)
+            .filter(|&(_, &latest)| latest > after)
+            .all(|(&region, _)| {
+                let start = region * JOURNAL_REGION_PAGES;
+                check(first.max(start), last.min(start + JOURNAL_REGION_PAGES))
+            })
+    }
+
+    fn any_after(&self, first: usize, last: usize, after: u64) -> bool {
+        !self.all_recent(first, last, after, |_, _| false)
+    }
+
     /// Page `page` was found written by asking `now`: the parts in `parts`
     /// (a bit each). The asking that found it written before (0: none).
     fn note(&mut self, page: usize, parts: u16, now: u64) -> u64 {
         let before = self.written.insert(page, now).unwrap_or(0);
+        let latest = self.latest.entry(page / JOURNAL_REGION_PAGES).or_default();
+        *latest = (*latest).max(now);
         if parts == WHOLE || !parts_on() {
             self.parts.remove(&page);
             return before;
@@ -104,6 +128,9 @@ impl Journal {
 /// the asking it took the page at): the parts to take again, a bit for each
 /// 4 KiB, in the same order.
 pub(crate) fn parts_written(pages: &[(usize, u64)]) -> Vec<u16> {
+    if pages.is_empty() {
+        return Vec::new();
+    }
     let j = journal();
     pages.iter().map(|&(page, taken)| j.parts_since(page, taken)).collect()
 }
@@ -175,9 +202,13 @@ pub(crate) fn track(start: usize, len: usize, views: bool) -> Option<Tracked> {
     })
 }
 
+const JOURNAL_REGION_PAGES: usize = (2 << 20) / PAGE;
+
 struct Journal {
     /// Page number â†’ the asking that last found it written.
     written: BTreeMap<usize, u64>,
+    /// Upper bound on write generations for each 2 MiB span with journal entries.
+    latest: BTreeMap<usize, u64>,
     /// The same for each of a page's sixteen parts ([`KERNEL_PAGE`]), where
     /// the parts are known ([`parts_on`]); a page that is not here was
     /// written whole, as far as anyone knows.
@@ -201,6 +232,7 @@ struct Journal {
 /// it, found it waiting for that lock (run pooloff1).
 static JOURNAL: RwLock<Journal> = RwLock::new(Journal {
     written: BTreeMap::new(),
+    latest: BTreeMap::new(),
     parts: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
     ahead: Vec::new(),
     ahead_asked: 0,
@@ -733,8 +765,21 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
 /// kernel just reported. `None` if the memory is not write-watched (nor,
 /// with `guarded`, view memory, which is then guarded).
 pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Vec<(usize, u64)>)> {
+    writes_after(start, end, guarded, 0)
+}
+
+/// Like `writes`, but omit entries already covered by a caller's copy.
+/// The caller must keep that copy's coverage stable for the refresh.
+pub(crate) fn writes_after(start: usize, end: usize, guarded: bool, after: u64) -> Option<(u64, Vec<(usize, u64)>)> {
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-    let of = |j: &Journal| -> Vec<(usize, u64)> { j.written.range(first..last).map(|(&p, &w)| (p, w)).collect() };
+    let of = |j: &Journal| {
+        let mut pages = Vec::new();
+        j.all_recent(first, last, after, |page, write| {
+            pages.push((page, write));
+            true
+        });
+        pages
+    };
     // Asked ahead with the submission's other ranges: the journal has it.
     let ahead = |j: &Journal| Journal::covers_ahead(&j.ahead, first, last).then(|| (j.ahead_asked, of(j)));
     if let Some(known) = ahead(&journal()) {
@@ -805,6 +850,30 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     Some(answer)
 }
 
+/// Whether the journal already knows of a write in `[start, end)` after
+/// `after`, without collecting the pages for a caller that needs only the
+/// answer. `None` means the kernel or guards would still have to be asked.
+pub(crate) fn known_writes_after(start: usize, end: usize, guarded: bool, after: u64) -> Option<(u64, bool)> {
+    let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    let known = {
+        let j = journal();
+        Journal::covers_ahead(&j.ahead, first, last).then(|| (j.ahead_asked, j.any_after(first, last, after)))
+    };
+    if let Some(known) = known {
+        return Some(known);
+    }
+    if guarded && published(start, end) {
+        #[cfg(feature = "diagnostics")]
+        {
+            tally(2, 1);
+            crate::faultbook::note(crate::faultbook::What::Known, first, last, 0);
+        }
+        let j = journal();
+        return Some((next_asking(), j.any_after(first, last, after)));
+    }
+    None
+}
+
 /// Whether nothing of `[start, end)` was written that a copy with the notes
 /// `copied` (the asking after which each page from page `base` on was taken)
 /// and `ranged` (the asking after which a range that holds this one was
@@ -827,7 +896,7 @@ pub(crate) fn nothing_new(start: usize, end: usize, base: usize, copied: &[u64],
         return false;
     };
     (ranged != 0 || taken.iter().all(|&at| at != 0))
-        && j.written.range(first..last).all(|(&page, &write)| write <= taken[page - first].max(ranged))
+        && j.all_recent(first, last, ranged, |page, write| write <= taken[page - first])
 }
 
 impl Tracked {
@@ -2149,6 +2218,84 @@ pub fn writing(at: usize, len: usize) {
 /// is dropped ([`kernel_writing`]).
 pub struct KernelWrite(usize, usize);
 
+/// Read and write transactions for bytes streamed through title memory.
+/// The lock protects range records, never the I/O or the texture copy.
+struct StreamMemory {
+    next: u64,
+    writes: Vec<(u64, std::ops::Range<usize>)>,
+    snapshots: Vec<(u64, std::ops::Range<usize>, bool)>,
+}
+
+static STREAM_MEMORY: Mutex<StreamMemory> =
+    Mutex::new(StreamMemory { next: 0, writes: Vec::new(), snapshots: Vec::new() });
+
+fn stream_memory() -> std::sync::MutexGuard<'static, StreamMemory> {
+    STREAM_MEMORY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn overlaps_stream(a: &std::ops::Range<usize>, b: &std::ops::Range<usize>) -> bool {
+    !a.is_empty() && !b.is_empty() && a.start < b.end && b.start < a.end
+}
+
+/// Keeps a DirectStorage destination ineligible for a new texture snapshot
+/// until the request's writes are over.
+#[must_use]
+pub struct StreamWrite(u64);
+
+pub fn stream_writing(at: usize, len: usize) -> StreamWrite {
+    let range = at..at.saturating_add(len);
+    let mut memory = stream_memory();
+    memory.next += 1;
+    let id = memory.next;
+    for (_, read, valid) in &mut memory.snapshots {
+        *valid &= !overlaps_stream(read, &range);
+    }
+    memory.writes.push((id, range));
+    StreamWrite(id)
+}
+
+impl Drop for StreamWrite {
+    fn drop(&mut self) {
+        let mut memory = stream_memory();
+        if let Some(slot) = memory.writes.iter().position(|(id, _)| *id == self.0) {
+            memory.writes.swap_remove(slot);
+        }
+    }
+}
+
+pub(crate) struct StreamSnapshot(Option<u64>);
+
+pub(crate) fn stream_snapshot(at: usize, len: usize) -> Option<StreamSnapshot> {
+    let range = at..at.saturating_add(len);
+    let mut memory = stream_memory();
+    if memory.writes.iter().any(|(_, write)| overlaps_stream(&range, write)) {
+        return None;
+    }
+    memory.next += 1;
+    let id = memory.next;
+    memory.snapshots.push((id, range, true));
+    Some(StreamSnapshot(Some(id)))
+}
+
+impl StreamSnapshot {
+    pub(crate) fn finish(mut self) -> bool {
+        self.remove()
+    }
+
+    fn remove(&mut self) -> bool {
+        let Some(id) = self.0.take() else { return false };
+        let mut memory = stream_memory();
+        memory.snapshots.iter().position(|(key, _, _)| *key == id)
+            .is_some_and(|slot| memory.snapshots.swap_remove(slot).2)
+    }
+}
+
+impl Drop for StreamSnapshot {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 /// The runtime is about to have the kernel write title memory
 /// `[at, at + len)` (a file read): its guarded blocks are opened, as by
 /// [`writing`], and no refresh guards them again before what this returns is
@@ -2156,6 +2303,16 @@ pub struct KernelWrite(usize, usize);
 /// write fail (the kernel does not fault into our handler): a read cut
 /// short, which the title takes for what the file holds.
 pub fn kernel_writing(at: usize, len: usize) -> KernelWrite {
+    begin_kernel_write(at, len, true)
+}
+
+/// A DirectStorage write opens the guards now and reports completed bytes
+/// separately. The texture pass need not be woken before those bytes exist.
+pub fn stream_kernel_writing(at: usize, len: usize) -> KernelWrite {
+    begin_kernel_write(at, len, false)
+}
+
+fn begin_kernel_write(at: usize, len: usize, notify: bool) -> KernelWrite {
     if len != 0 {
         state_changed();
     }
@@ -2175,7 +2332,9 @@ pub fn kernel_writing(at: usize, len: usize) -> KernelWrite {
             g.kernel.push((first, last));
         }
     }
-    crate::descriptor::host::remapped(at, len);
+    if notify {
+        crate::descriptor::host::remapped(at, len);
+    }
     KernelWrite(first, if len == 0 { first } else { last })
 }
 
@@ -2772,6 +2931,7 @@ mod parts_tests {
     fn the_parts_of_a_page_written_since_it_was_taken() {
         let mut j = Journal {
             written: BTreeMap::new(),
+            latest: BTreeMap::new(),
             parts: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
             ahead: Vec::new(),
             ahead_asked: 0,
@@ -2799,6 +2959,44 @@ mod parts_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_change_query_matches_filtering_written_pages() {
+        let mut journal = Journal {
+            written: BTreeMap::new(),
+            latest: BTreeMap::new(),
+            parts: Default::default(),
+            ahead: Vec::new(),
+            ahead_asked: 0,
+            kept: false,
+        };
+        for (page, at) in [(10, 4), (11, 8), (12, 3), (14, 9), (64, 14), (86, 15), (120, 12)] {
+            journal.note(page, WHOLE, at);
+        }
+        for after in 0..10 {
+            let expected = journal.written.range(10..13).any(|(_, &write)| write > after);
+            assert_eq!(journal.any_after(10, 13, after), expected);
+        }
+        assert!(!journal.any_after(20, 21, 0));
+        assert!(journal.any_after(11, 15, 8));
+        assert!(!journal.any_after(16, 64, 1));
+        assert!(!journal.any_after(10, 86, 14));
+        assert!(journal.any_after(10, 87, 14));
+        assert!(journal.all_recent(10, 121, 12, |page, _| matches!(page, 64 | 86)));
+    }
+
+    #[test]
+    fn a_texture_snapshot_cannot_include_an_overlapping_storage_write() {
+        let at = 0x56_1111_0000;
+        let before = stream_snapshot(at, 0x2000).unwrap();
+        let separate = stream_snapshot(at + 0x2000, 0x1000).unwrap();
+        let write = stream_writing(at + 0x1000, 0x1000);
+        assert!(stream_snapshot(at, 0x2000).is_none());
+        assert!(separate.finish());
+        drop(write);
+        assert!(!before.finish(), "a write starting and ending within a snapshot invalidates it");
+        assert!(stream_snapshot(at, 0x2000).unwrap().finish());
+    }
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };

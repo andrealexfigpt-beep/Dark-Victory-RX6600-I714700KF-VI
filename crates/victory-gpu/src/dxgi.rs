@@ -7,6 +7,8 @@ use crate::object::{
     self, ADAPTER, DXGI_DEVICE, E_INVALIDARG, FACTORY, HRESULT, Iid, MORE_DATA, NOT_FOUND, OUTPUT,
     Object, S_OK, Table, This, guid,
 };
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_MODE_DESC};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ENUM_MODES, IDXGIFactory1};
 
 /// The DXGI device interfaces, base first (as on PC).
 pub(crate) const DEVICE_IIDS: [Iid; 3] = [
@@ -248,10 +250,51 @@ fn display_size() -> (u32, u32) {
     })
 }
 
-/// The console's mode list: one 4K mode at 60 Hz (the title looks
-/// for a 120 Hz one to allow 120 Hz frame intervals).
-/// shortcut: fixed mode, not the host display's; report the host's rates if
-/// a title paces by them.
+/// The highest refresh rate the host output reports for the emulated
+/// display size. The title uses it to choose its frame interval.
+fn display_refresh() -> u32 {
+    static REFRESH: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *REFRESH.get_or_init(|| {
+        let (width, height) = display_size();
+        let refresh = (|| {
+            let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+            let adapter = unsafe { factory.EnumAdapters1(0) }.ok()?;
+            let output = unsafe { adapter.EnumOutputs(0) }.ok()?;
+            let mut count = 0u32;
+            unsafe {
+                output.GetDisplayModeList(
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                    DXGI_ENUM_MODES(0),
+                    &mut count,
+                    None,
+                )
+            }
+            .ok()?;
+            if count == 0 { return None; }
+            let mut modes = vec![DXGI_MODE_DESC::default(); count as usize];
+            unsafe {
+                output.GetDisplayModeList(
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                    DXGI_ENUM_MODES(0),
+                    &mut count,
+                    Some(modes.as_mut_ptr()),
+                )
+            }
+            .ok()?;
+            modes
+                .iter()
+                .filter(|mode| mode.Width == width && mode.Height == height)
+                .map(|mode| mode.RefreshRate.Numerator / mode.RefreshRate.Denominator.max(1))
+                .max()
+        })()
+        .unwrap_or(60);
+        tracing::info!(width, height, refresh, "host display refresh reported to the title");
+        refresh
+    })
+}
+
+/// The console's mode list: the emulated display size at the host output's
+/// highest matching refresh rate.
 extern "system" fn modes(
     _: This,
     _format: u32,
@@ -275,7 +318,7 @@ extern "system" fn modes(
     let mode = Mode {
         width,
         height,
-        refresh: [60, 1],
+        refresh: [display_refresh(), 1],
         format: 0,
         scanlines: 1, // progressive
         scaling: 0,

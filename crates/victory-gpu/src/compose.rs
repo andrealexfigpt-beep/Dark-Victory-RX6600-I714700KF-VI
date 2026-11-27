@@ -29,6 +29,10 @@ float4 ps(V v) : SV_Target {
     float4 o = over.SampleLevel(smooth_, v.uv, 0);
     return float4(saturate(o.rgb + s.rgb * (1 - saturate(o.a))), 1);
 }
+[RootSignature(RS)]
+float4 ps_plane(V v) : SV_Target {
+    return scene.SampleLevel(smooth_, v.uv, 0);
+}
 "#;
 
 pub(crate) struct Composer {
@@ -66,9 +70,17 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
 
 impl Composer {
     pub(crate) fn new(host: &Host, format: DXGI_FORMAT) -> windows::core::Result<Self> {
+        Self::with_pixel(host, format, s!("ps"))
+    }
+
+    pub(crate) fn single_plane(host: &Host, format: DXGI_FORMAT) -> windows::core::Result<Self> {
+        Self::with_pixel(host, format, s!("ps_plane"))
+    }
+
+    fn with_pixel(host: &Host, format: DXGI_FORMAT, pixel: PCSTR) -> windows::core::Result<Self> {
         let (vs, ps) = (
             compile(s!("vs"), s!("vs_5_1"))?,
-            compile(s!("ps"), s!("ps_5_1"))?,
+            compile(pixel, s!("ps_5_1"))?,
         );
         // SAFETY: the blobs' own bytes, alive through the calls.
         unsafe {

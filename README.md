@@ -99,6 +99,12 @@ cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path-to-your-title-executable>
 ```
 
+The borderless Full HD Series S profile uses FidelityFX upscaling and
+frame generation when the signed AMD SDK 2.4 is available. Pass
+`-FidelityFxDir <path-to-signedbin>` to select your SDK installation.
+`-Native` selects the original path and `-NoFrameGeneration` keeps
+FidelityFX upscaling active. See [the FidelityFX setup](docs/fidelityfx.md).
+
 For the Dark Full HD/fullscreen profile:
 
 ```powershell
