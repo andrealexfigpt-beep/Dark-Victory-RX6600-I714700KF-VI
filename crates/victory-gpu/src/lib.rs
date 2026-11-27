@@ -77,6 +77,8 @@ mod sampler;
 #[cfg(windows)]
 pub mod shader_cache;
 #[cfg(windows)]
+pub mod shader_perm;
+#[cfg(windows)]
 mod memory;
 #[cfg(windows)]
 mod shadow;
