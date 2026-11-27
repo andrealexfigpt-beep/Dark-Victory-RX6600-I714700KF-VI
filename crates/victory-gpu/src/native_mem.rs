@@ -926,6 +926,9 @@ impl NativeMemory {
         });
 
         if let Some((fence_value, resource, heap, heap_offset)) = resource_info {
+            // Untrack from memory manager (Phase 3 Native Graphics).
+            crate::host::memory_mgr::untrack_gpu_resource(&resource);
+
             // Queue for deferred destruction after the fence completes
             if fence_value > 0 {
                 self.queue_deferred_destruction(fence_value, resource, heap, heap_offset);
@@ -955,11 +958,14 @@ impl NativeMemory {
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, uav)?;
 
         let binding = Arc::new(GpuResourceBinding::new_buffer(
-            title_va, size, resource, gpu_va, uav
+            title_va, size, resource.clone(), gpu_va, uav
         ));
         // Store heap info for potential aliasing
         binding.heap_offset = offset;
         binding.heap = heap;
+
+        // Track with memory manager (Phase 3 Native Graphics).
+        crate::host::memory_mgr::track_gpu_resource(&resource, size, true);
 
         self.gpu_bindings.insert(title_va, binding.clone());
         self.stats.gpu_resources.fetch_add(1, Ordering::Relaxed);
@@ -1556,8 +1562,11 @@ impl NativeMemory {
         let (resource, gpu_va, offset, heap) = self.allocate_default_texture_resource(desc, uav)?;
 
         let binding = Arc::new(GpuResourceBinding::new_texture(
-            title_va, size, resource, gpu_va, uav, desc, offset, heap
+            title_va, size, resource.clone(), gpu_va, uav, desc, offset, heap
         ));
+
+        // Track with memory manager (Phase 3 Native Graphics).
+        crate::host::memory_mgr::track_gpu_resource(&resource, size, true);
 
         self.gpu_bindings.insert(title_va, binding.clone());
         self.stats.gpu_resources.fetch_add(1, Ordering::Relaxed);
