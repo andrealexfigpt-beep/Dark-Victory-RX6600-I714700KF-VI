@@ -12,7 +12,7 @@
 //! - No page faults, no write watching, no journal, no ASKING mutex
 //! - CPU/GPU coherence via explicit Map/Unmap + fence ordering (standard D3D12)
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -207,7 +207,7 @@ impl GpuResourceBinding {
     }
 
     /// Calculate upload footprint for a texture subresource.
-    fn texture_footprint(&self, device: &ID3D12Device, subresource: u32) -> (u64, u32, u32, u64) {
+    fn texture_footprint(&self, device: &ID3D12Device, subresource: u32) -> (D3D12_PLACED_SUBRESOURCE_FOOTPRINT, u32, u32, u64) {
         let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
         let mut rows = 0u32;
         let mut row_pitch = 0u64;
@@ -237,7 +237,41 @@ impl GpuResourceBinding {
             );
         }
         
-        (footprint.Offset, rows, footprint.Footprint.RowPitch, total_bytes)
+        (footprint, rows, footprint.Footprint.RowPitch, total_bytes)
+    }
+
+    /// Get the full footprint for a subresource (for CopyTextureRegion).
+    fn get_subresource_footprint(&self, subresource: u32) -> D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+        let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+        let mut rows = 0u32;
+        let mut row_pitch = 0u64;
+        let mut total_bytes = 0u64;
+        
+        unsafe {
+            self.device.GetCopyableFootprints(
+                &D3D12_RESOURCE_DESC {
+                    Dimension: self.dimension,
+                    Alignment: 0,
+                    Width: self.width,
+                    Height: self.height,
+                    DepthOrArraySize: self.depth_or_array_size,
+                    MipLevels: self.mip_levels,
+                    Format: self.format,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: self.sample_count, Quality: 0 },
+                    Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+                    Flags: if self.uav { D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS } else { D3D12_RESOURCE_FLAGS(0) },
+                },
+                subresource,
+                1,
+                0,
+                Some(&mut footprint),
+                Some(&mut rows),
+                Some(&mut row_pitch),
+                Some(&mut total_bytes),
+            );
+        }
+        
+        footprint
     }
 }
 
@@ -662,6 +696,13 @@ pub struct NativeMemory {
     device: Arc<ID3D12Device>,
     copy_queue: Arc<ID3D12CommandQueue>,
 
+    /// Copy command allocator and list for texture operations.
+    copy_allocator: Mutex<ID3D12CommandAllocator>,
+    copy_list: Mutex<ID3D12GraphicsCommandList>,
+    copy_fence: ID3D12Fence,
+    copy_fence_value: AtomicU64,
+    copy_fence_event: std::ptr::NullMut,
+
     /// Sparse allocation registry: title VA -> HostAllocation.
     /// Uses DashMap for lock-free concurrent access.
     allocations: DashMap<u64, Arc<HostAllocation>>,
@@ -681,11 +722,21 @@ pub struct NativeMemory {
     /// Persistent readback ring buffer.
     readback_ring: OnceLock<ReadbackRing>,
 
+    /// Deferred resource destruction queue (fence value -> resources to destroy).
+    deferred_destruction: Mutex<BTreeMap<u64, Vec<DeferredResource>>>,
+
     /// Frame counter for statistics.
     frame: AtomicU64,
 
     /// Statistics.
     stats: NativeMemoryStats,
+}
+
+/// A resource deferred for destruction after GPU fence completion.
+struct DeferredResource {
+    resource: ID3D12Resource,
+    heap: Option<ID3D12Heap>,
+    heap_offset: u64,
 }
 
 #[derive(Default, Debug)]
@@ -717,15 +768,33 @@ impl NativeMemory {
             D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS,
         )?;
 
+        // Create copy command allocator and list for texture operations
+        let copy_allocator: ID3D12CommandAllocator = unsafe {
+            device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY)?
+        };
+        let copy_list: ID3D12GraphicsCommandList = unsafe {
+            device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, &copy_allocator, None)?
+        };
+        unsafe { copy_list.Close()? };
+
+        let copy_fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
+        let copy_fence_event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None) };
+
         Ok(NativeMemory {
             device,
             copy_queue,
+            copy_allocator: Mutex::new(copy_allocator),
+            copy_list: Mutex::new(copy_list),
+            copy_fence,
+            copy_fence_value: AtomicU64::new(1),
+            copy_fence_event,
             allocations: DashMap::new(),
             gpu_bindings: DashMap::new(),
             default_arenas: Mutex::new(vec![Arc::new(default_arena)]),
             upload_arenas: Mutex::new(vec![Arc::new(upload_arena)]),
             upload_ring: OnceLock::new(),
             readback_ring: OnceLock::new(),
+            deferred_destruction: Mutex::new(BTreeMap::new()),
             frame: AtomicU64::new(0),
             stats: NativeMemoryStats::default(),
         })
@@ -1027,7 +1096,7 @@ impl NativeMemory {
         }
 
         // Calculate expected size for this subresource
-        let (footprint_offset, rows, footprint_row_pitch, total_bytes) = binding.texture_footprint(&self.device, subresource);
+        let (footprint, rows, footprint_row_pitch, total_bytes) = binding.texture_footprint(&self.device, subresource);
         
         if data.len() as u64 != total_bytes {
             return Err(anyhow::anyhow!(
@@ -1082,35 +1151,120 @@ impl NativeMemory {
             }
         }
 
-        // Record texture copy command using CopyTextureRegion
-        let copy_queue = &self.copy_queue;
-        
-        // We need a command list for CopyTextureRegion, so we'll use the copy queue's
-        // direct copy via CopyBufferRegion with the footprint layout
-        // For simplicity, we use the upload buffer as a placed footprint source
-        // This requires a command list, which we don't have direct access to here.
-        // In practice, this would be called from a command list context.
-        
-        // For now, use the buffer copy approach with the footprint layout
-        // This works because the upload ring buffer has the data laid out correctly
-        unsafe {
-            copy_queue.CopyBufferRegion(
-                &binding.resource,
-                footprint_offset,
-                &ring.resource,
-                ring_offset,
-                total_bytes,
-            );
-        }
+        // Record texture copy command using CopyTextureRegion on copy command list
+        self.record_texture_copy(
+            &binding.resource,
+            subresource,
+            &ring.resource,
+            ring_offset,
+            &footprint,
+            rows,
+        )?;
 
-        // Signal fence
-        let fence_value = ring.signal_fence(copy_queue);
+        // Execute copy command list and signal fence
+        let fence_value = self.execute_copy_list()?;
         binding.fence_value = fence_value;
 
         self.stats.upload_bytes.fetch_add(total_bytes, Ordering::Relaxed);
         self.stats.copy_operations.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
+    }
+
+    /// Record a texture copy command to the copy command list.
+    fn record_texture_copy(
+        &self,
+        dst_resource: &ID3D12Resource,
+        dst_subresource: u32,
+        src_resource: &ID3D12Resource,
+        src_offset: u64,
+        footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+        rows: u32,
+    ) -> anyhow::Result<()> {
+        let list = self.copy_list.lock().unwrap();
+        let allocator = self.copy_allocator.lock().unwrap();
+        
+        // Reset allocator and list
+        unsafe { allocator.Reset()? };
+        unsafe { list.Reset(&allocator, None)? };
+
+        // Source: placed footprint on upload ring buffer
+        let from = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: unsafe { std::mem::transmute_copy(src_resource) },
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                    Offset: src_offset + footprint.Offset,
+                    Footprint: footprint.Footprint,
+                },
+            },
+        };
+
+        // Destination: subresource on texture resource
+        let to = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: unsafe { std::mem::transmute_copy(dst_resource) },
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: dst_subresource,
+            },
+        };
+
+        // Copy texture region
+        unsafe { list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
+
+        // Close the command list
+        unsafe { list.Close()? };
+
+        Ok(())
+    }
+
+    /// Execute the copy command list and signal fence.
+    /// Returns the fence value.
+    fn execute_copy_list(&self) -> anyhow::Result<u64> {
+        let list = self.copy_list.lock().unwrap();
+        let copy_queue = &self.copy_queue;
+        
+        unsafe {
+            copy_queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+        }
+
+        let fence_value = self.copy_fence_value.fetch_add(1, Ordering::AcqRel);
+        unsafe { copy_queue.Signal(&self.copy_fence, fence_value) }?;
+
+        // Wait for completion (synchronous for correctness)
+        unsafe {
+            self.copy_fence.SetEventOnCompletion(fence_value, self.copy_fence_event)?;
+            windows::Win32::Foundation::WaitForSingleObject(self.copy_fence_event, u32::MAX);
+        }
+
+        Ok(fence_value)
+    }
+
+    /// Process deferred resource destruction for completed fences.
+    pub fn process_deferred_destruction(&self, completed_fence: u64) {
+        let mut deferred = self.deferred_destruction.lock().unwrap();
+        let to_destroy: Vec<_> = deferred.range(..=completed_fence).flat_map(|(_, v)| v.iter().cloned()).collect();
+        
+        for res in to_destroy {
+            // Resource will be dropped here, D3D12 will handle cleanup
+            // Heap memory becomes available for reuse
+            drop(res.resource);
+            if let Some(heap) = res.heap {
+                drop(heap);
+            }
+        }
+        
+        deferred.retain(|&k, _| k > completed_fence);
+    }
+
+    /// Queue a resource for deferred destruction after the given fence value.
+    pub fn queue_deferred_destruction(&self, fence_value: u64, resource: ID3D12Resource, heap: Option<ID3D12Heap>, heap_offset: u64) {
+        let mut deferred = self.deferred_destruction.lock().unwrap();
+        deferred.entry(fence_value).or_default().push(DeferredResource {
+            resource,
+            heap,
+            heap_offset,
+        });
     }
 
     /// Upload full texture (all mip levels and array slices) from CPU to GPU.
@@ -1163,12 +1317,10 @@ impl NativeMemory {
             std::thread::yield_now();
         };
 
-        let copy_queue = &self.copy_queue;
-        let mut current_ring_offset = ring_offset;
-
         // Upload each subresource
+        let mut current_ring_offset = ring_offset;
         for i in 0..subresource_count {
-            let (footprint_offset, rows, footprint_row_pitch, total_bytes) = binding.texture_footprint(&self.device, i);
+            let (footprint, rows, footprint_row_pitch, total_bytes) = binding.texture_footprint(&self.device, i);
             let sub_data = &subresource_data[i as usize];
             
             let src_ptr = sub_data.pData as *const u8;
@@ -1197,22 +1349,21 @@ impl NativeMemory {
                 }
             }
 
-            // Record copy command
-            unsafe {
-                copy_queue.CopyBufferRegion(
-                    &binding.resource,
-                    footprint_offset,
-                    &ring.resource,
-                    current_ring_offset,
-                    total_bytes,
-                );
-            }
+            // Record texture copy command for this subresource
+            self.record_texture_copy(
+                &binding.resource,
+                i,
+                &ring.resource,
+                current_ring_offset,
+                &footprint,
+                rows,
+            )?;
 
             current_ring_offset += total_bytes.next_multiple_of(UPLOAD_ALIGNMENT);
         }
 
-        // Signal fence
-        let fence_value = ring.signal_fence(copy_queue);
+        // Execute all recorded copy commands and signal fence
+        let fence_value = self.execute_copy_list()?;
         binding.fence_value = fence_value;
 
         self.stats.upload_bytes.fetch_add(total_upload_size, Ordering::Relaxed);
@@ -1324,8 +1475,18 @@ impl NativeMemory {
     }
 
     /// Advance frame counter and report stats.
+    /// Also processes deferred resource destruction for completed fences.
     pub fn next_frame(&self) {
         let frame = self.frame.fetch_add(1, Ordering::Relaxed);
+        
+        // Process deferred resource destruction
+        let completed_fence = self.copy_fence.GetCompletedValue();
+        self.process_deferred_destruction(completed_fence);
+        
+        // Also process upload/readback ring fence completion for buffer uploads
+        let upload_completed = self.upload_ring().completed_fence();
+        let readback_completed = self.readback_ring().completed_fence();
+        
         if frame % 60 == 0 {
             self.report_stats(frame);
         }
