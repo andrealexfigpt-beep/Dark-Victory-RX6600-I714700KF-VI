@@ -4647,39 +4647,6 @@ impl Host {
             stamps: OnceLock::new(),
         })
     }
-                all.insert(
-                    number,
-                    (
-                        std::sync::Arc::downgrade(&notes),
-                        std::sync::Arc::downgrade(&pipelines),
-                        std::sync::Arc::downgrade(&indirects),
-                    ),
-                );
-            }
-            Ok(HostList {
-                allocator,
-                list,
-                deferred: Mutex::default(),
-                scratch: Mutex::default(),
-                states: Mutex::default(),
-                twins: Mutex::default(),
-                pipelines,
-                #[cfg(feature = "diagnostics")]
-                indirects,
-                budget: OnceLock::new(),
-                card_budget: OnceLock::new(),
-                indirect_args: Mutex::default(),
-                batch_args: Mutex::default(),
-                coming: Mutex::default(),
-                epoch: std::sync::atomic::AtomicU64::new(next_epoch()),
-                _alive: Counted::new(),
-                #[cfg(feature = "diagnostics")]
-                notes,
-                #[cfg(feature = "diagnostics")]
-                stamps: OnceLock::new(),
-            })
-        }
-    }
 
     /// The card's clock ([`CARD_CLOCK_US`]), made at the first send.
     fn card_clock(&self) -> Option<&'static CardClock> {
