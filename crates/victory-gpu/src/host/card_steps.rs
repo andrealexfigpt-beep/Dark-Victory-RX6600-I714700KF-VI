@@ -390,7 +390,6 @@ fn elsewhere(does: &[Does], shadow: usize, from: usize, to: usize) -> bool {
 /// The host copy that holds `[from, to)` on the card once what `writers`
 /// write is there: the one they all write it through, or without any the
 /// one shaders would be given.
-}
 
 fn holder(writers: &[Writer], from: usize, to: usize) -> Result<crate::shadow::ShadowHandle, &'static str> {
     let mut found: Option<&crate::shadow::ShadowHandle> = None;

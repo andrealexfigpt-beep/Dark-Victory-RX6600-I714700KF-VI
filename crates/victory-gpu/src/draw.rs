@@ -538,17 +538,10 @@ impl HeapRanges {
             self.slots.resize_with(index + 1, || None);
         }
         let key = |copy: &crate::shadow::ShadowHandle| -> usize {
-            match copy {
-                crate::shadow::ShadowHandle::Legacy(arc) => std::sync::Arc::as_ptr(arc) as usize,
-                crate::shadow::ShadowHandle::Native(arc) => std::sync::Arc::as_ptr(arc) as usize,
-            }
+            copy.as_ptr()
         };
         let ptr_eq = |a: &crate::shadow::ShadowHandle, b: &crate::shadow::ShadowHandle| -> bool {
-            match (a, b) {
-                (crate::shadow::ShadowHandle::Legacy(a), crate::shadow::ShadowHandle::Legacy(b)) => std::sync::Arc::ptr_eq(a, b),
-                (crate::shadow::ShadowHandle::Native(a), crate::shadow::ShadowHandle::Native(b)) => std::sync::Arc::ptr_eq(a, b),
-                _ => false,
-            }
+            a.ptr_eq(b)
         };
         let old = &mut self.slots[index];
         if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
