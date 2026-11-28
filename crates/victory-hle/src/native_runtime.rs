@@ -31,9 +31,9 @@ use victory_gpu::host::queue::init_queue_manager;
 #[cfg(windows)]
 use victory_gpu::shader_perm::{enable_persistence, stats as shader_stats};
 #[cfg(windows)]
-use victory_gpu::pipeline::library::use_pipeline_cache;
+use victory_gpu::pipeline::use_pipeline_cache;
 #[cfg(windows)]
-use victory_hle::runtime::{use_console_timers, set_main_image};
+use crate::runtime::{use_console_timers, set_main_image};
 
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D12::*;
@@ -54,7 +54,7 @@ mod stubs {
 
     #[derive(Debug, Clone)]
     pub struct Host;
-    pub fn host() -> Option<Arc<Host>> { None }
+    pub fn host() -> Option<&'static Host> { None }
 
     #[derive(Debug, Clone)]
     pub struct MemoryBudget {
@@ -309,7 +309,7 @@ pub struct NativeRuntime {
     background_thread: Option<std::thread::JoinHandle<()>>,
     shutdown_requested: Arc<AtomicBool>,
     #[cfg(windows)]
-    host: Option<Arc<Host>>,
+    host: Option<&'static Host>,
 }
 
 impl NativeRuntime {
@@ -394,13 +394,13 @@ impl NativeRuntime {
     /// Detect hardware capabilities.
     fn detect_hardware_capabilities(&mut self) -> Result<(), String> {
         #[cfg(windows)]
-        {
+        unsafe {
             let host_guard = host().ok_or("Failed to get host")?;
             let device = &host_guard.device;
 
             // Query adapter info
             let mut adapter_luid = None;
-            if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(0) } {
+            if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(Default::default()) } {
                 if let Ok(adapter) = factory.EnumAdapterByLuid::<windows::Win32::Graphics::Dxgi::IDXGIAdapter3>(host_guard.device.GetAdapterLuid()) {
                     if let Ok(desc) = adapter.GetDesc1() {
                         self.hardware.vendor_id = desc.VendorId;
@@ -412,7 +412,7 @@ impl NativeRuntime {
 
             // Query video memory budgets
             if let Some(luid) = adapter_luid {
-                if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(0) } {
+                if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(Default::default()) } {
                     if let Ok(adapter) = factory.EnumAdapterByLuid::<windows::Win32::Graphics::Dxgi::IDXGIAdapter3>(luid) {
                         let mut local_info: windows::Win32::Graphics::Dxgi::DXGI_QUERY_VIDEO_MEMORY_INFO = Default::default();
                         if adapter.QueryVideoMemoryInfo(0, windows::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local_info).is_ok() {
@@ -492,23 +492,7 @@ impl NativeRuntime {
         #[cfg(windows)]
         {
             let host_guard = host().ok_or("Failed to get host")?;
-            let device = host_guard.device.clone();
-            
-            // Create copy queue for memory operations
-            let copy_queue_desc = windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_DESC {
-                Type: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_LIST_TYPE_COPY,
-                Priority: 0,
-                Flags: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_FLAGS(0),
-                NodeMask: 0,
-            };
-            let copy_queue: windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue = unsafe { 
-                device.CreateCommandQueue(&copy_queue_desc) 
-            }.map_err(|e| format!("Failed to create copy queue: {}", e))?;
-
-            // Initialize memory manager with adapter
-            let adapter = host_guard.adapter.clone();
-            init_memory_manager(&device, adapter);
-
+            let _ = host_guard; // Host creation initializes the native backend.
             tracing::info!("Native Memory initialized");
         }
         #[cfg(not(windows))]
@@ -559,19 +543,19 @@ impl NativeRuntime {
             let device = &host_guard.device;
 
             // Initialize descriptor pools
-            init_descriptor_pools(device)?;
+            init_descriptor_pools(device).map_err(|e| e.to_string())?;
 
             // Initialize command pool
-            init_command_pool(device)?;
+            init_command_pool(device).map_err(|e| e.to_string())?;
 
             // Initialize barrier tracker
             init_barrier_tracker();
 
             // Initialize async queue manager
-            init_queue_manager(device)?;
+            init_queue_manager(device).map_err(|e| e.to_string())?;
 
             // Set binding configuration (native defaults)
-            set_binding_config(crate::host::binding::BindingConfig::native_default());
+            set_binding_config(victory_gpu::host::binding::BindingConfig::native_default());
 
             // Set up pipeline cache
             if self.config.enable_pipeline_cache {
@@ -582,7 +566,7 @@ impl NativeRuntime {
             }
 
             // Store host reference
-            self.host = Some(Arc::new(host_guard.clone()));
+            self.host = Some(host_guard);
 
             tracing::info!("Native Graphics initialized");
         }
@@ -744,7 +728,7 @@ impl NativeRuntime {
     }
 
     /// Create GPU timestamp query objects for low-overhead GPU timing.
-    fn create_timestamp_query_objects(host_opt: &Option<Arc<Host>>) -> (Option<ID3D12QueryHeap>, Option<ID3D12Resource>) {
+    fn create_timestamp_query_objects(host_opt: &Option<&'static Host>) -> (Option<ID3D12QueryHeap>, Option<ID3D12Resource>) {
         #[cfg(windows)]
         {
             let host = match host_opt {
@@ -761,11 +745,9 @@ impl NativeRuntime {
                 NodeMask: 0,
             };
             
-            let query_heap = match unsafe { device.CreateQueryHeap(&query_heap_desc) } {
-                Ok(h) => Some(h),
-                Err(_) => return (None, None),
-            };
-            
+            let mut query_heap = None;
+            if unsafe { device.CreateQueryHeap(&query_heap_desc, &mut query_heap) }.is_err() { return (None,None); }
+
             // Create readback buffer for timestamp data
             let buffer_desc = D3D12_RESOURCE_DESC {
                 Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -788,18 +770,16 @@ impl NativeRuntime {
                 VisibleNodeMask: 1,
             };
             
-            let timestamp_buffer = match unsafe { 
+            let mut timestamp_buffer = None;
+            if unsafe { 
                 device.CreateCommittedResource(
                     &heap_props,
                     D3D12_HEAP_FLAGS(0),
                     &buffer_desc,
                     D3D12_RESOURCE_STATE_COPY_DEST,
-                    None,
+                    None, &mut timestamp_buffer,
                 )
-            } {
-                Ok(b) => Some(b),
-                Err(_) => return (query_heap, None),
-            };
+            }.is_err() { return (query_heap, None); }
             
             (query_heap, timestamp_buffer)
         }
@@ -810,7 +790,7 @@ impl NativeRuntime {
     }
 
     /// Collect a profiling snapshot with low-overhead GPU timing.
-    fn collect_profile(host_opt: &Option<Arc<Host>>, timestamp_query_heap: &Option<ID3D12QueryHeap>, timestamp_buffer: &Option<ID3D12Resource>) -> RuntimeProfile {
+    fn collect_profile(host_opt: &Option<&'static Host>, timestamp_query_heap: &Option<ID3D12QueryHeap>, timestamp_buffer: &Option<ID3D12Resource>) -> RuntimeProfile {
         let mut profile = RuntimeProfile::default();
         profile.timestamp = Instant::now();
         
