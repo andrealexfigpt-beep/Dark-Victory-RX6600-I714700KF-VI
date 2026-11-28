@@ -1464,7 +1464,7 @@ impl State {
                 crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
             
             let Some(shadow) = shadow else {
                 continue;
@@ -1491,7 +1491,7 @@ impl State {
                 crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
             
             let Some(shadow) = shadow else {
                 return false;
@@ -1893,7 +1893,7 @@ impl State {
                     host.null_raw_uav_at(index);
                 }
                 self.root_uav_slots
-                    .insert(key, (index, shadow.map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.map(|(_, s)| s.cloned())));
                 (index, shadow)
             }
         };
@@ -1958,7 +1958,7 @@ impl State {
                 };
                 self.dynamic.push((key.0, index, 1));
                 self.root_srv_slots
-                    .insert(key, (index, shadow.map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.map(|(_, s): &(u64, ShadowHandle)| s.cloned())));
                 match &shadow {
                     Some((a, s)) => {
                         // SAFETY: a live buffer.

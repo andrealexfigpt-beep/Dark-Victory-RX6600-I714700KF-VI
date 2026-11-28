@@ -3735,7 +3735,7 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow: Option<ShadowHandle> = {
+    let mut shadow = {
         #[cfg(all(windows, feature = "native-memory"))]
         {
             if crate::memory_backend::is_native_backend_active() {
@@ -3746,7 +3746,10 @@ fn buffer_srv(
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
         crate::shadow::find(address, len).map(ShadowHandle)
-    }?;
+    };
+    let Some(mut shadow) = shadow else {
+        return None;
+    };
     let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
     // SAFETY: a buffer view's union member.
@@ -3853,7 +3856,7 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow: Option<ShadowHandle> = {
+    let mut shadow = {
         #[cfg(all(windows, feature = "native-memory"))]
         {
             if crate::memory_backend::is_native_backend_active() {
@@ -3864,7 +3867,10 @@ fn buffer_uav(
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
         crate::shadow::find(address, len).map(ShadowHandle)
-    }?;
+    };
+    let Some(mut shadow) = shadow else {
+        return None;
+    };
     let unit = {
         // SAFETY: a buffer view's union member.
         let b = unsafe { desc.Anonymous.Buffer };

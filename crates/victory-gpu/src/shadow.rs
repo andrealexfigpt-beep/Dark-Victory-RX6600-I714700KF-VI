@@ -27,12 +27,14 @@ use crate::watch::PAGE;
 /// Unified shadow handle that works with both legacy and native backends.
 /// Provides a common API for GPU VA lookup, refresh, and GPU write tracking.
 #[cfg(all(windows, feature = "native-memory"))]
+#[derive(Clone)]
 pub enum ShadowHandle {
     Legacy(Arc<Shadow>),
     Native(Arc<crate::native_mem::NativeShadow>),
 }
 
 #[cfg(all(windows, not(feature = "native-memory")))]
+#[derive(Clone)]
 pub struct ShadowHandle(pub Arc<Shadow>);
 
 #[cfg(all(windows, not(feature = "native-memory")))]
