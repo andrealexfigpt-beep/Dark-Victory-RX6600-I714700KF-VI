@@ -1461,10 +1461,10 @@ impl State {
             let shadow = if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_any_handle(v.address, u64::from(v.size))
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
             
             let Some(shadow) = shadow else {
                 continue;
@@ -1488,10 +1488,10 @@ impl State {
             let shadow = if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_any_handle(v.address, u64::from(v.size))
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
             
             let Some(shadow) = shadow else {
                 return false;
@@ -1893,7 +1893,7 @@ impl State {
                     host.null_raw_uav_at(index);
                 }
                 self.root_uav_slots
-                    .insert(key, (index, shadow.map(|(_, s)| s.cloned())));
+                    .insert(key, (index, shadow.map(|(_, s)| s.clone())));
                 (index, shadow)
             }
         };
@@ -1948,17 +1948,17 @@ impl State {
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(a, 1).map(|s| (a, s))
             } else {
-                crate::shadow::find(a, 1).map(|s| (a, s.into()))
+                crate::shadow::find(a, 1).map(|s| (a, ShadowHandle::Legacy(s)))
             }
             #[cfg(not(all(windows, feature = "native-memory")))]
-            crate::shadow::find(a, 1).map(|s| (a, s.into()))
+            crate::shadow::find(a, 1).map(|s| (a, ShadowHandle(s)))
         });
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
                 self.dynamic.push((key.0, index, 1));
                 self.root_srv_slots
-                    .insert(key, (index, shadow.map(|(_, s): &(u64, ShadowHandle)| s.cloned())));
+                    .insert(key, (index, shadow.map(|(_, s)| s.clone())));
                 match &shadow {
                     Some((a, s)) => {
                         // SAFETY: a live buffer.

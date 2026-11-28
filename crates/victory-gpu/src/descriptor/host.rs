@@ -3757,7 +3757,7 @@ fn buffer_srv(
     let start = address + own.FirstElement * unit;
     let kind = (own.StructureByteStride, own.Flags.0 & D3D12_BUFFER_SRV_FLAG_RAW.0 != 0, desc.Format.0 as u32);
     let home = view_home(shadow.clone(), start, u64::from(own.NumElements) * unit, kind);
-    if !std::sync::Arc::ptr_eq(&home, &shadow) {
+    if !shadow.ptr_eq(&home) {
         // Its own bytes: it begins where they do.
         (shadow, offset) = (home, 0);
         own.FirstElement = 0;
@@ -3888,7 +3888,7 @@ fn buffer_uav(
     let kind = (own.StructureByteStride, own.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0, desc.Format.0 as u32);
     let home = view_home(shadow.clone(), start, u64::from(own.NumElements) * unit, kind);
     let mut address = address;
-    if !std::sync::Arc::ptr_eq(&home, &shadow) {
+    if !shadow.ptr_eq(&home) {
         // Its own bytes: it begins where they do.
         (shadow, address) = (home, start);
         own.FirstElement = 0;

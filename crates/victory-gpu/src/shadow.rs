@@ -88,6 +88,11 @@ impl ShadowHandle {
     pub fn offset(&self, address: u64) -> u64 {
         self.0.offset(address)
     }
+
+    /// Compare pointer equality of the inner Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[cfg(all(windows, not(feature = "native-memory")))]
@@ -184,6 +189,15 @@ impl ShadowHandle {
         match self {
             ShadowHandle::Legacy(s) => s.width(),
             ShadowHandle::Native(s) => s.width(),
+        }
+    }
+
+    /// Compare pointer equality of the inner Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ShadowHandle::Legacy(a), ShadowHandle::Legacy(b)) => std::sync::Arc::ptr_eq(a, b),
+            (ShadowHandle::Native(a), ShadowHandle::Native(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
         }
     }
 }

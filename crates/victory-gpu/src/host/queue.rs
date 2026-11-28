@@ -66,7 +66,7 @@ impl QueueManager {
         // Create graphics queue (always present).
         let graphics_queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
-            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
             Flags: D3D12_COMMAND_QUEUE_FLAGS(0),
             NodeMask: 0,
         };
@@ -77,7 +77,7 @@ impl QueueManager {
         let compute = if Self::supports_compute_queue(device) {
             let compute_queue_desc = D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+                Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
                 Flags: D3D12_COMMAND_QUEUE_FLAGS(0),
                 NodeMask: 0,
             };
@@ -97,7 +97,7 @@ impl QueueManager {
         // Create copy queue.
         let copy_queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_COPY,
-            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
             Flags: D3D12_COMMAND_QUEUE_FLAGS(0),
             NodeMask: 0,
         };

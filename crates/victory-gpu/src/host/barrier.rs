@@ -281,7 +281,7 @@ pub(crate) fn emit_tracked_barriers(
     let tracker = barrier_tracker();
     let barriers = tracker.emit_barriers(required);
     if !barriers.is_empty() {
-        unsafe { list.ResourceBarrier(barriers.len() as u32, barriers.as_ptr()) };
+        unsafe { list.ResourceBarrier(&barriers) };
     }
     barriers.len() as u32
 }
