@@ -3519,29 +3519,6 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
-// #[cfg(not(all(windows, feature = "native-memory")))]
-// pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
-    let (address, len) = buffer_range(view)?;
-    if len == 0 {
-        return None;
-    }
-    if view_extent()
-        && let Some((base, width)) = buffer_extent(view)
-        // (The console is lax: a view may begin past its buffer's end.)
-        && address >= base
-        && address - base < width.max(1)
-        && let Some(shadow) = {
-            crate::shadow::find(base, width).map(Into::into)
-        }
-    {
-        return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
-    }
-    let shadow = {
-        crate::shadow::find(address, len).map(Into::into)
-    }?;
-    Some((view_home(shadow, address, len, view_elements(view)?), address, len))
-}
-
 /// [`buffer_range`] of an unordered access view of memory at `base`.
 fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     let desc = uav_desc(words);
