@@ -24,6 +24,197 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 use crate::host::{HostList, host};
 use crate::watch::PAGE;
 
+/// Shadow handle that wraps Arc<Shadow> for unified API.
+/// Provides common API for GPU VA lookup, refresh, and GPU write tracking.
+#[derive(Clone)]
+pub struct ShadowHandle(pub Arc<Shadow>);
+
+impl From<Arc<Shadow>> for ShadowHandle {
+    fn from(s: Arc<Shadow>) -> Self {
+        ShadowHandle(s)
+    }
+}
+
+impl std::ops::Deref for ShadowHandle {
+    type Target = Shadow;
+    
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ShadowHandle {
+    /// Get the GPU virtual address for a title address.
+    pub fn gpu(&self, address: u64) -> u64 {
+        self.0.gpu(address)
+    }
+
+    /// The title memory the copy is of: its start and length.
+    pub fn span(&self) -> (u64, u64) {
+        self.0.span()
+    }
+
+    /// The offset of a title address in the copy, if it lies in it.
+    pub fn offset_in(&self, address: u64) -> Option<u64> {
+        self.0.offset_in(address)
+    }
+
+    /// Bytes from a title address to the buffer's end.
+    pub fn left(&self, address: u64) -> u64 {
+        self.0.left(address)
+    }
+
+    /// Bring `len` bytes at `address` up to date when `list` is submitted.
+    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
+        self.0.refresh(list, address, len)
+    }
+
+    /// Shaders of `list` may write `[address, address + len)` of the copy.
+    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
+        self.0.gpu_writes(list, address, len)
+    }
+
+    /// Whether the memory behind the copy turned out not to be write-watched.
+    pub fn unwatched(&self) -> bool {
+        self.0.unwatched()
+    }
+
+    /// Claim this copy's full refresh even when several heaps view it.
+    pub fn take_unwatched_refresh(&self, frame: u64) -> bool {
+        self.0.take_unwatched_refresh(frame)
+    }
+
+    /// Get the underlying D3D12 resource for descriptor creation.
+    pub fn resource(&self) -> &ID3D12Resource {
+        &self.0.buffer
+    }
+
+    /// Get the underlying D3D12 resource buffer.
+    pub fn buffer(&self) -> &ID3D12Resource {
+        &self.0.buffer
+    }
+
+    /// Offset of a title address from the buffer's start (legacy only, for view_home).
+    pub fn offset(&self, address: u64) -> u64 {
+        self.0.offset(address)
+    }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        self.0.width()
+    }
+
+    /// Whether the copy has any pending GPU writes.
+    pub fn writes_pending(&self) -> bool {
+        self.0.writes_pending()
+    }
+
+    /// Whether the copy has pending GPU writes in the given range.
+    pub fn writes_pending_in(&self, from: usize, to: usize) -> bool {
+        self.0.writes_pending_in(from, to)
+    }
+
+    /// Whether the memory is stale under GPU writes.
+    pub fn stale_under_writes(&self, address: usize, len: usize) -> bool {
+        self.0.stale_under_writes(address, len)
+    }
+
+    /// Merges the given range under GPU writes, returns true if merged.
+    pub fn merge_under_writes(&self, address: usize, len: usize, runs_left: &mut usize) -> bool {
+        self.0.merge_under_writes(address, len, runs_left)
+    }
+
+    /// Compare pointer equality of the inner Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Get a unique pointer key for use as a map key.
+    pub fn as_ptr(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.0) as usize
+    }
+
+    /// Whether a submission asks the kernel about the copy's ranges ahead.
+    pub fn asked_ahead(&self) -> bool {
+        self.0.asked_ahead()
+    }
+
+    /// Mark that shaders are writing to a range of the copy.
+    pub fn writing(&self, address: usize, len: usize) {
+        self.0.writing(address, len)
+    }
+
+    /// Whether this copy is carded (part of the card's memory).
+    pub fn carded(&self) -> bool {
+        self.0.carded()
+    }
+
+    /// Whether this copy is in-place (title memory in place).
+    pub fn in_place(&self) -> bool {
+        self.0.in_place()
+    }
+
+    /// Compare this copy's relay pages with another copy's.
+    pub fn relay_compared(&self, address: usize, len: usize) {
+        self.0.relay_compared(address, len)
+    }
+
+    /// Copy back the given ranges from GPU to CPU.
+    pub fn copy_back_done(&self, ranges: &[(usize, usize)]) {
+        self.0.copy_back_done(ranges)
+    }
+
+    /// Copy back a range from GPU to CPU, returning the number of bytes copied.
+    pub fn copy_back(&self, address: usize, len: usize) -> usize {
+        self.0.copy_back(address, len)
+    }
+
+    /// Copy back a range from GPU to CPU with additional found ranges, returning the number of bytes copied.
+    pub fn copy_back_with(&self, address: usize, len: usize, found: Option<Vec<(usize, usize)>>) -> usize {
+        self.0.copy_back_with(address, len, found)
+    }
+
+    /// The copy's own number.
+    pub fn id(&self) -> u64 {
+        self.0.id()
+    }
+
+    /// The offsets of piece `i` of `span` that lie in the span.
+    pub fn card_piece(&self, span: &crate::shadow::CardSpan, i: u32) -> (usize, usize) {
+        self.0.card_piece(span, i)
+    }
+
+    /// The sides of a card span.
+    pub fn card_sides(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.0.card_sides()
+    }
+
+    /// The size of the card hash.
+    pub fn card_hash_size(&self) -> u64 {
+        self.0.card_hash_size()
+    }
+
+    /// Merge a range on the card.
+    pub fn card_merge(&self, lo: usize, gpu: usize, title: &mut usize) -> bool {
+        self.0.card_merge(lo, gpu, title)
+    }
+
+    /// Mark walls as merged.
+    pub fn walls_merged(&self, len: usize, merged: bool) {
+        self.0.walls_merged(len, merged)
+    }
+
+    /// Send up the copy's ranges.
+    pub fn send_up(&self, number: u64, merged: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        self.0.send_up(number, merged)
+    }
+
+    /// Land the copy on the card.
+    pub fn land_card(&self, parts: impl Iterator<Item = (usize, usize)>, after: u64, notes: &mut Vec<(usize, usize)>) {
+        self.0.land_card(parts, after, notes)
+    }
+}
+
 /// Positive proofs that ranges of one host copy were unchanged. A proof is
 /// reused only under the same write-watch/guard epoch and GPU-pending epoch;
 /// the journal check remains the fallback whenever either has moved.
