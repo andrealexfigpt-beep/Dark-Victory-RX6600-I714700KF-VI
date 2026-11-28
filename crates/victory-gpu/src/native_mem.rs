@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE};
+use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VIRTUAL_ALLOCATION_TYPE, PAGE_PROTECTION_FLAGS};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
 use crate::host::{host, Host, HostList};
@@ -326,11 +326,13 @@ impl GpuArena {
                 CreationNodeMask: 1,
                 VisibleNodeMask: 1,
             },
-            Alignment: D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            Alignment: D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT as u64,
             Flags: flags,
         };
 
-        let heap: ID3D12Heap = unsafe { device.CreateHeap(&desc)? };
+        let mut heap: Option<ID3D12Heap> = None;
+        unsafe { device.CreateHeap(&desc, &ID3D12Heap::IID, heap.as_mut().map(|h| h as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut())).ok()? };
+        let heap = heap.ok_or(windows::core::Error::from(winerror::E_FAIL))?;
 
         Ok(GpuArena {
             heap,
@@ -456,7 +458,9 @@ impl UploadRing {
             VisibleNodeMask: 1,
         };
 
-        let resource: ID3D12Resource = unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None)? };
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None, &ID3D12Resource::IID, resource.as_mut().map(|r| r as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut())).ok()? };
+        let resource = resource.ok_or(windows::core::Error::from(winerror::E_FAIL))?;
 
         // Map the resource for CPU writes
         let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
@@ -628,7 +632,9 @@ impl ReadbackRing {
             VisibleNodeMask: 1,
         };
 
-        let resource: ID3D12Resource = unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_COPY_DEST, None)? };
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &ID3D12Resource::IID, resource.as_mut().map(|r| r as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut())).ok()? };
+        let resource = resource.ok_or(windows::core::Error::from(winerror::E_FAIL))?;
 
         let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
         unsafe {
@@ -885,8 +891,8 @@ impl NativeMemory {
                 VirtualAlloc(
                     aligned_va as *mut _,
                     size as usize,
-                    MEM_RESERVE,
-                    PAGE_READWRITE,
+                    VIRTUAL_ALLOCATION_TYPE(MEM_RESERVE.0),
+                    PAGE_PROTECTION_FLAGS(PAGE_READWRITE.0),
                 )
             };
             if ptr.is_null() {
@@ -912,8 +918,8 @@ impl NativeMemory {
                 VirtualAlloc(
                     aligned_va as *mut _,
                     size as usize,
-                    MEM_RESERVE | MEM_COMMIT,
-                    protect,
+                    VIRTUAL_ALLOCATION_TYPE(MEM_RESERVE.0 | MEM_COMMIT.0),
+                    PAGE_PROTECTION_FLAGS(protect),
                 )
             };
             if ptr.is_null() {
