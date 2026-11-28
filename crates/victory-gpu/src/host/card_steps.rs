@@ -555,7 +555,16 @@ fn fill_to(runs: &[&HostList], step: (usize, usize)) -> Option<FillTo> {
     }
 }
 
-/// A step done on the card.
+#[cfg(all(windows, feature = "native-memory"))]
+struct Op {
+    from: (ShadowHandle, usize),
+    len: usize,
+    /// Its place in the buffer between.
+    at: u64,
+    level: u32,
+    to: To,
+}
+#[cfg(not(all(windows, feature = "native-memory")))]
 struct Op {
     from: (Arc<Shadow>, usize),
     len: usize,
@@ -665,6 +674,13 @@ static DONE: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::Ato
 /// What [`Host::card_steps`] took off a submission: the list that does it,
 /// for the submission to run first, and the steps the CPU leaves out (their
 /// list by address, their place in it).
+#[cfg(all(windows, feature = "native-memory"))]
+pub(super) struct Taken {
+    own: Own,
+    steps: std::collections::HashSet<(usize, usize), std::hash::BuildHasherDefault<AddressHash>>,
+    copied: Vec<(ShadowHandle, usize, usize)>,
+}
+#[cfg(not(all(windows, feature = "native-memory")))]
 pub(super) struct Taken {
     own: Own,
     steps: std::collections::HashSet<(usize, usize), std::hash::BuildHasherDefault<AddressHash>>,
