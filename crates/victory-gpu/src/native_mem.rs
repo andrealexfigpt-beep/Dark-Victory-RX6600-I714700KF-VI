@@ -470,7 +470,7 @@ impl UploadRing {
         }
 
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAGS(0))? };
-        let fence_event = unsafe { CreateEventW(None, false, false, None) };
+        let fence_event = unsafe { CreateEventW(None, false, false, None)? };
 
         Ok(UploadRing {
             resource,
@@ -643,7 +643,7 @@ impl ReadbackRing {
         }
 
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAGS(0))? };
-        let fence_event = unsafe { CreateEventW(None, false, false, None) };
+        let fence_event = unsafe { CreateEventW(None, false, false, None)? };
 
         Ok(ReadbackRing {
             resource,
@@ -798,6 +798,7 @@ unsafe impl Send for NativeMemory {}
 unsafe impl Sync for NativeMemory {}
 
 /// A resource deferred for destruction after GPU fence completion.
+#[derive(Clone)]
 struct DeferredResource {
     resource: ID3D12Resource,
     heap: Option<ID3D12Heap>,
@@ -843,7 +844,7 @@ impl NativeMemory {
         unsafe { copy_list.Close()? };
 
         let copy_fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
-        let copy_fence_event = unsafe { CreateEventW(None, false, false, None) };
+        let copy_fence_event = unsafe { CreateEventW(None, false, false, None)? };
 
         Ok(NativeMemory {
             device,
@@ -1314,7 +1315,7 @@ impl NativeMemory {
         let copy_queue = &self.copy_queue;
         
         unsafe {
-            copy_queue.ExecuteCommandLists(&[Some(list.as_ref().clone())]);
+            copy_queue.ExecuteCommandLists(&[Some(list.cast()?)]);
         }
 
         let fence_value = self.copy_fence_value.fetch_add(1, Ordering::AcqRel);
@@ -1413,7 +1414,7 @@ impl NativeMemory {
             let sub_data = &subresource_data[i as usize];
             
             let src_ptr = sub_data.pData as *const u8;
-            let src_row_pitch = if sub_data.RowPitch > 0 { sub_data.RowPitch as u64 } else { footprint_row_pitch };
+            let src_row_pitch = if sub_data.RowPitch > 0 { sub_data.RowPitch as u64 } else { footprint_row_pitch as u64 };
             let src_slice_pitch = if sub_data.SlicePitch > 0 { sub_data.SlicePitch } else { total_bytes };
             
             let dst_ptr = unsafe { ring_ptr.add(current_ring_offset as usize) };
@@ -1624,8 +1625,9 @@ impl NativeMemory {
             // Use GetCopyableFootprints for accurate size calculation
             // For now, estimate based on format
             let block_size = self.format_block_size(desc.Format);
-            let blocks_x = (width + 3) / 4;
-            let blocks_y = (height + 3) / 4;
+            let blocks_x = ((width + 3) / 4) as u64;
+            let blocks_y = ((height + 3) / 4) as u64;
+            let depth = depth as u64;
             total += blocks_x * blocks_y * depth * block_size;
             
             width = (width / 2).max(1);
