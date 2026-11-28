@@ -15,16 +15,18 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::ptr;
 
 use dashmap::DashMap;
 use tracing::{debug, info, warn};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
-use crate::host::{host, Host};
-use crate::resource::{footprint, AllocationInfo};
+use crate::host::{host, Host, HostList};
+use crate::resource::{AllocationInfo, footprint};
 
 /// Page size matching the console's 64 KiB page.
 pub const PAGE: u64 = 64 * 1024;
@@ -45,7 +47,7 @@ const MIN_HEAP_SIZE: u64 = 64 * 1024;
 const GPU_ARENA_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Upload heap alignment (64 KiB).
-const UPLOAD_ALIGNMENT: u64 = 64 * 1024;
+pub const UPLOAD_ALIGNMENT: u64 = 64 * 1024;
 
 /// Default heap alignment (64 KiB).
 const DEFAULT_ALIGNMENT: u64 = 64 * 1024;
@@ -413,7 +415,7 @@ struct UploadRing {
     /// Current fence value.
     fence_value: AtomicU64,
     /// Event for fence waiting.
-    fence_event: std::ptr::NullMut,
+    fence_event: HANDLE,
     /// Pending allocations: (offset, size, fence_value).
     /// Protected by a mutex for thread-safe access.
     pending: Mutex<Vec<(u64, u64, u64)>>,
@@ -551,7 +553,7 @@ impl UploadRing {
     /// Wait for a fence value (blocking).
     fn wait_fence(&self, value: u64) {
         unsafe { self.fence.SetEventOnCompletion(value, self.fence_event) }.ok();
-        unsafe { windows::Win32::Foundation::WaitForSingleObject(self.fence_event, u32::MAX) };
+        unsafe { WaitForSingleObject(self.fence_event, u32::MAX) };
     }
     
     /// Get the current completed fence value.
@@ -705,7 +707,7 @@ impl ReadbackRing {
 
     fn wait_fence(&self, value: u64) {
         unsafe { self.fence.SetEventOnCompletion(value, self.fence_event) }.ok();
-        unsafe { windows::Win32::Foundation::WaitForSingleObject(self.fence_event, u32::MAX) };
+        unsafe { WaitForSingleObject(self.fence_event, u32::MAX) };
     }
     
     fn completed_fence(&self) -> u64 {
@@ -734,7 +736,7 @@ pub struct NativeMemory {
     copy_list: Mutex<ID3D12GraphicsCommandList>,
     copy_fence: ID3D12Fence,
     copy_fence_value: AtomicU64,
-    copy_fence_event: std::ptr::NullMut,
+    copy_fence_event: HANDLE,
 
     /// Sparse allocation registry: title VA -> HostAllocation.
     /// Uses DashMap for lock-free concurrent access.
@@ -811,7 +813,7 @@ impl NativeMemory {
         unsafe { copy_list.Close()? };
 
         let copy_fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
-        let copy_fence_event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None) };
+        let copy_fence_event = unsafe { CreateEventW(None, false, false, None) };
 
         Ok(NativeMemory {
             device,

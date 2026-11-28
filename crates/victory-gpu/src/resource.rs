@@ -187,7 +187,7 @@ pub(crate) fn texture_layout(desc: &ResourceDesc) -> Option<texture::Texture> {
 /// aligned), textures their console layout (formats it does not know:
 /// every mip of every array slice and sample, packed, 64 KiB aligned),
 /// rounded up to the alignment.
-fn footprint(desc: &ResourceDesc) -> Option<AllocationInfo> {
+pub(crate) fn footprint(desc: &ResourceDesc) -> Option<AllocationInfo> {
     if desc.dimension != BUFFER
         && let Some(t) = texture_layout(desc)
     {
