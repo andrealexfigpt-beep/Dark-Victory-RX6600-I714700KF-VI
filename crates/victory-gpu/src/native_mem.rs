@@ -1616,7 +1616,7 @@ impl NativeMemory {
 
         // No existing allocation (placeholder or committed) covers this range.
         // Create a new committed allocation.
-        self.allocate_committed(aligned_va, size, PAGE_READWRITE)
+        self.allocate_committed(aligned_va, size, SYS_PAGE_READWRITE)
     }
 
     /// Commit a placeholder allocation for the given range.
