@@ -1174,7 +1174,7 @@ mod tests {
         let address = 0x6000_0000_0000u64;
         let one = crate::shadow::find_known(address, 64 << 10).expect("a host window");
         let two = crate::shadow::find_known(address, 64 << 10).expect("the same host window");
-        assert!(std::sync::Arc::ptr_eq(&one, &two));
+        assert!(.ptr_eq(&one, &two));
         assert!((64 << 10..=128 << 10).contains(&one.span().1));
     }
 
@@ -3135,6 +3135,9 @@ fn late_writes() -> bool {
 
 /// Per host copy, the ranges a submission's shaders may write, as declared
 /// (address, end).
+#[cfg(all(windows, feature = "native-memory"))]
+type Declared = (crate::shadow::ShadowHandle, Vec<(usize, usize)>);
+#[cfg(not(all(windows, feature = "native-memory")))]
 type Declared = (std::sync::Arc<crate::shadow::Shadow>, Vec<(usize, usize)>);
 
 /// What [`Host::submit`] hands back for a submission it sent and did not
@@ -4364,7 +4367,7 @@ fn declared_writes(runs: &[&HostList]) -> Vec<Declared> {
     for list in runs {
         for step in &list.deferred().copies {
             if let Step::GpuWrite(shadow, address, len) = step {
-                let key = std::sync::Arc::as_ptr(shadow) as usize;
+                let key = shadow.as_ptr();
                 if !seen.insert((key, *address, *len)) {
                     continue;
                 }
@@ -5184,12 +5187,12 @@ impl Host {
                         (0..r.span.pieces).map(move |p| {
                             let flagged = !r.compared || differs.get((r.at + p) as usize).is_none_or(|&d| torn::flagged(d));
                             let wanted = suspects.map_or(flagged, |s| s.wanted((r.shadow.id(), r.span.first + p), flagged));
-                            (std::sync::Arc::as_ptr(&r.shadow) as usize, r.span.first + p, wanted)
+                            (.as_ptr()(&r.shadow) as usize, r.span.first + p, wanted)
                         })
                     });
                 let fetched = flagged_pieces(flags);
                 for r in plan.ranges.iter().filter(|r| !r.picked) {
-                    let copy = std::sync::Arc::as_ptr(&r.shadow) as usize;
+                    let copy = .as_ptr()(&r.shadow) as usize;
                     if upcheck::on() {
                         upcheck::declared(r.shadow.id(), r.span.from as usize, r.span.to as usize);
                     }
@@ -5320,7 +5323,7 @@ impl Host {
                 let copies = check.as_ref().map_or(&pieces, |c| &c.copies);
                 // Coalesce consecutive commands only when both sides are contiguous.
                 for run in copies.chunk_by(|a, b| {
-                    std::sync::Arc::ptr_eq(&a.0, &b.0) && a.2 == b.1 && a.3 + (a.2 - a.1) as u64 == b.3
+                    .ptr_eq(&a.0, &b.0) && a.2 == b.1 && a.3 + (a.2 - a.1) as u64 == b.3
                 }) {
                     let (shadow, lo, _, at) = &run[0];
                     let hi = run[run.len() - 1].2;
@@ -5390,7 +5393,7 @@ impl Host {
                 }
                 let mut notes = land::Notes::default();
                 let mut merged = 0;
-                for run in pieces[jobs[j].clone()].chunk_by(|a, b| std::sync::Arc::ptr_eq(&a.0, &b.0)) {
+                for run in pieces[jobs[j].clone()].chunk_by(|a, b| .ptr_eq(&a.0, &b.0)) {
                     let addressed = run.iter().map(|(_, lo, hi, at)| (*lo, *hi, data + *at as usize));
                     // SAFETY: the fetch has finished and the mapping lives
                     // until all merge jobs return.
@@ -5468,7 +5471,7 @@ impl Host {
                 let mut back: Vec<Declared> = Vec::new();
                 for flight in &flights {
                     for (shadow, ranges) in flight.back.iter().filter(|(shadow, _)| !shadow.carded()) {
-                        match back.iter_mut().find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow)) {
+                        match back.iter_mut().find(|(s, _)| .ptr_eq(s, shadow)) {
                             Some((_, all)) => all.extend_from_slice(ranges),
                             None => back.push((shadow.clone(), ranges.clone())),
                         }
@@ -5609,7 +5612,7 @@ impl Host {
                     continue;
                 }
                 let (lo, hi) = r.shadow.card_piece(&r.span, p);
-                if lo < hi && seen.insert((std::sync::Arc::as_ptr(&r.shadow) as usize, lo, hi)) {
+                if lo < hi && seen.insert((.as_ptr()(&r.shadow) as usize, lo, hi)) {
                     pieces.push((i, lo, hi, total));
                     total += (hi - lo) as u64;
                 }
@@ -5966,7 +5969,7 @@ impl Host {
                         self.card_back(card, submitted, &mut seen);
                     }
                     for (shadow, ranges) in &flight.back {
-                        match back.iter_mut().find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow)) {
+                        match back.iter_mut().find(|(s, _)| .ptr_eq(s, shadow)) {
                             Some((_, all)) => {
                                 for range in ranges {
                                     if !all.contains(range) {
@@ -6935,7 +6938,7 @@ impl HostList {
         let texture: &'static ID3D12Resource = unsafe { &*std::ptr::from_ref(&copy.texture) };
         let wanted = legal_for(copy.flags(), wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        match states.entry(std::sync::Arc::as_ptr(&copy) as usize) {
+        match states.entry(.as_ptr()(&copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert((wanted, wanted, copy));
                 self.changed_something();
@@ -6959,7 +6962,7 @@ impl HostList {
         let wanted = legal_for(copy.flags(), wanted);
         self.changed_something();
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        let before = match states.entry(std::sync::Arc::as_ptr(copy) as usize) {
+        let before = match states.entry(.as_ptr()(copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert((wanted, wanted, copy.clone()));
                 None
@@ -7012,7 +7015,7 @@ impl HostList {
         let side = usize::from(colour);
         let mut twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
         let u = twins
-            .entry(std::sync::Arc::as_ptr(&twin) as usize)
+            .entry(.as_ptr()(&twin) as usize)
             .or_insert_with(|| TwinUse {
                 depth: depth.clone(),
                 twin: twin.clone(),
@@ -7223,7 +7226,7 @@ impl HostList {
                 (&twin.colour, depth)
             };
             for (texture, state) in [(from, COPY_SOURCE), (to, COPY_DEST)] {
-                let key = std::sync::Arc::as_ptr(texture) as usize;
+                let key = .as_ptr()(texture) as usize;
                 let real = texture.state.load(Ordering::Relaxed);
                 copying.insert(key, state);
                 if real != state {
@@ -7445,6 +7448,7 @@ impl HostList {
     /// Brings `[address, address + len)` of a buffer's host copy up to date
     /// when the list is submitted (once per range until a title copy
     /// intervenes), keeping the copy alive until the list is reset.
+    #[cfg(not(all(windows, feature = "native-memory")))]
     pub(crate) fn defer_refresh(
         &self,
         shadow: &std::sync::Arc<crate::shadow::Shadow>,
@@ -7452,7 +7456,23 @@ impl HostList {
         len: usize,
     ) {
         let mut deferred = self.deferred();
-        let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
+        let key = (.as_ptr()(shadow) as usize, address, len);
+        if deferred.refreshed.insert(key) {
+            deferred
+                .copies
+                .push(Step::Refresh(shadow.clone(), address, len));
+        }
+    }
+
+    #[cfg(all(windows, feature = "native-memory"))]
+    pub(crate) fn defer_refresh(
+        &self,
+        shadow: &crate::shadow::ShadowHandle,
+        address: usize,
+        len: usize,
+    ) {
+        let mut deferred = self.deferred();
+        let key = (shadow.as_ptr(), address, len);
         if deferred.refreshed.insert(key) {
             deferred
                 .copies
@@ -7465,6 +7485,7 @@ impl HostList {
     /// Declared once until the list next writes title memory (but with
     /// `VICTORY_DECLARE_ONCE=0`): the dispatches of a frame declared the
     /// same ranges thousands of times, each a step of its own.
+    #[cfg(not(all(windows, feature = "native-memory")))]
     pub(crate) fn defer_gpu_write(
         &self,
         shadow: &std::sync::Arc<crate::shadow::Shadow>,
@@ -7472,7 +7493,21 @@ impl HostList {
         len: usize,
     ) {
         let mut deferred = self.deferred();
-        let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
+        let key = (.as_ptr()(shadow) as usize, address, len);
+        if deferred.gpu_written.insert(key) || !declare_once() {
+            deferred.copies.push(Step::GpuWrite(shadow.clone(), address, len));
+        }
+    }
+
+    #[cfg(all(windows, feature = "native-memory"))]
+    pub(crate) fn defer_gpu_write(
+        &self,
+        shadow: &crate::shadow::ShadowHandle,
+        address: usize,
+        len: usize,
+    ) {
+        let mut deferred = self.deferred();
+        let key = (shadow.as_ptr(), address, len);
         if deferred.gpu_written.insert(key) || !declare_once() {
             deferred.copies.push(Step::GpuWrite(shadow.clone(), address, len));
         }
@@ -8452,7 +8487,7 @@ impl Batch {
 
     fn add(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>, address: usize, len: usize) {
         let end = address + len;
-        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let key = .as_ptr()(shadow) as usize;
         if self.ahead.get(&key).is_some_and(|&(from, to)| from <= address && end <= to) {
             return;
         }
@@ -8474,15 +8509,15 @@ impl Batch {
         // From here on it is refreshed around what the shaders write. (What
         // is in front of all the steps was, up to here.)
         if !self.front {
-            self.ahead.remove(&(std::sync::Arc::as_ptr(shadow) as usize));
+            self.ahead.remove(&(.as_ptr()(shadow) as usize));
         }
-        let Some(at) = self.index.remove(&(std::sync::Arc::as_ptr(shadow) as usize)) else {
+        let Some(at) = self.index.remove(&(.as_ptr()(shadow) as usize)) else {
             return;
         };
         let (shadow, from, to) = self.refreshes.swap_remove(at);
         // The last entry took its place.
         if let Some(moved) = self.refreshes.get(at) {
-            self.index.insert(std::sync::Arc::as_ptr(&moved.0) as usize, at);
+            self.index.insert(.as_ptr()(&moved.0) as usize, at);
         }
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
@@ -8534,7 +8569,7 @@ impl Batch {
     /// Whether `staging` is still to be refreshed in this submission (and
     /// notes it refreshed).
     fn texture_due<T>(&mut self, staging: &std::sync::Arc<T>) -> bool {
-        self.textures.insert(std::sync::Arc::as_ptr(staging) as *const () as usize)
+        self.textures.insert(.as_ptr()(staging) as *const () as usize)
     }
 
     /// Before a step that writes title memory: pending refreshes are done
@@ -8558,9 +8593,9 @@ impl Batch {
             for step in &list.deferred().copies {
                 match step {
                     Step::Refresh(shadow, at, len) => {
-                        front.refresh(std::sync::Arc::as_ptr(shadow) as usize, shadow, *at, *at + *len, part);
+                        front.refresh(.as_ptr()(shadow) as usize, shadow, *at, *at + *len, part);
                     }
-                    Step::GpuWrite(shadow, ..) => front.write(std::sync::Arc::as_ptr(shadow) as usize, shadow, part),
+                    Step::GpuWrite(shadow, ..) => front.write(.as_ptr()(shadow) as usize, shadow, part),
                     Step::Texture(staging) if wide_textures() => {
                         if self.texture_due(staging) {
                             due.push(staging.clone());
@@ -8573,7 +8608,7 @@ impl Batch {
         let spans = front.finish();
         self.front = true;
         for (shadow, from, to) in &spans {
-            self.ahead.insert(std::sync::Arc::as_ptr(shadow) as usize, (*from, *to));
+            self.ahead.insert(.as_ptr()(shadow) as usize, (*from, *to));
         }
         #[cfg(feature = "diagnostics")]
         {
@@ -8632,11 +8667,11 @@ impl Batch {
             for (i, step) in list.deferred().copies.iter().enumerate() {
                 touches.push(match step {
                     Step::Refresh(shadow, at, len) => {
-                        let key = std::sync::Arc::as_ptr(shadow) as usize;
+                        let key = .as_ptr()(shadow) as usize;
                         copies.entry(key).or_insert_with(|| shadow.clone());
                         Touch::Refresh(key, *at, *at + *len)
                     }
-                    Step::GpuWrite(shadow, ..) => Touch::Write(std::sync::Arc::as_ptr(shadow) as usize),
+                    Step::GpuWrite(shadow, ..) => Touch::Write(.as_ptr()(shadow) as usize),
                     Step::Copy(..) if taken(list, i) => Touch::Nothing,
                     Step::Copy(..) | Step::Run(_) | Step::Placed(_) => break 'steps,
                     _ => Touch::Nothing,
@@ -8648,7 +8683,7 @@ impl Batch {
             .filter_map(|(key, from, to)| Some((copies.get(&key)?.clone(), from, to)))
             .collect();
         for (shadow, from, to) in &due {
-            self.ahead.insert(std::sync::Arc::as_ptr(shadow) as usize, (*from, *to));
+            self.ahead.insert(.as_ptr()(shadow) as usize, (*from, *to));
         }
         #[cfg(feature = "diagnostics")]
         let began = std::time::Instant::now();

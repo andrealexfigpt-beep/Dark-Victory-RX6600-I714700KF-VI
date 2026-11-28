@@ -338,6 +338,9 @@ pub(super) fn reads(runs: &[&HostList]) {
     for item in &super::line().line {
         if let Late::Run(flight) = item {
             for (shadow, ranges) in &flight.back {
+                #[cfg(all(windows, feature = "native-memory"))]
+                writes.extend(ranges.iter().map(|&(a, b)| (shadow.clone(), a, b)));
+                #[cfg(not(all(windows, feature = "native-memory")))]
                 writes.extend(ranges.iter().map(|&(a, b)| (shadow.clone(), a, b)));
                 join_ranges(&mut all, ranges.iter().copied());
             }

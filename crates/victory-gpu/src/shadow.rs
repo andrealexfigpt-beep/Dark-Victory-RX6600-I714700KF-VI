@@ -252,6 +252,22 @@ impl ShadowHandle {
             ShadowHandle::Native(a) => std::sync::Arc::as_ptr(a) as usize,
         }
     }
+
+    /// Whether a submission asks the kernel about the copy's ranges ahead.
+    pub fn asked_ahead(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.asked_ahead(),
+            ShadowHandle::Native(_) => false, // Native backend doesn't track this
+        }
+    }
+
+    /// Mark that shaders are writing to a range of the copy.
+    pub fn writing(&self, address: usize, len: usize) {
+        match self {
+            ShadowHandle::Legacy(s) => s.writing(address, len),
+            ShadowHandle::Native(_) => {}, // Native backend handles this differently
+        }
+    }
 }
 
 /// Positive proofs that ranges of one host copy were unchanged. A proof is

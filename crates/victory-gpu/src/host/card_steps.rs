@@ -148,6 +148,16 @@ pub(super) fn writers(items: &[Late]) -> Vec<Writer> {
     for item in items {
         match item {
             Late::Run(flight) => {
+                #[cfg(all(windows, feature = "native-memory"))]
+                for (shadow, ranges) in &flight.back {
+                    out.extend(ranges.iter().map(|&(from, to)| Writer {
+                        shadow: Some(shadow.clone()),
+                        from,
+                        to,
+                        copy: false,
+                    }));
+                }
+                #[cfg(not(all(windows, feature = "native-memory")))]
                 for (shadow, ranges) in &flight.back {
                     out.extend(ranges.iter().map(|&(from, to)| Writer {
                         shadow: Some(shadow.clone()),
@@ -398,8 +408,9 @@ fn elsewhere(does: &[Does], shadow: usize, from: usize, to: usize) -> bool {
 /// The host copy that holds `[from, to)` on the card once what `writers`
 /// write is there: the one they all write it through, or without any the
 /// one shaders would be given.
-fn holder(writers: &[Writer], from: usize, to: usize) -> Result<Arc<Shadow>, &'static str> {
-    let mut found: Option<&Arc<Shadow>> = None;
+#[cfg(not(all(windows, feature = "native-memory")))]
+fn holder(writers: &[Writer], from: usize, to: usize) -> Result<std::sync::Arc<crate::shadow::Shadow>, &'static str> {
+    let mut found: Option<&std::sync::Arc<crate::shadow::Shadow>> = None;
     for w in writers.iter().filter(|w| meet((w.from, w.to), (from, to))) {
         match (&w.shadow, found) {
             (None, _) => return Err("a read-back or a value behind a flight is written there"),
@@ -410,6 +421,27 @@ fn holder(writers: &[Writer], from: usize, to: usize) -> Result<Arc<Shadow>, &'s
     let shadow = match found {
         Some(s) => s.clone(),
         None => crate::shadow::find(from as u64, (to - from) as u64).ok_or("no host copy of it")?,
+    };
+    let (start, len) = shadow.span();
+    if shadow.in_place() || (from as u64) < start || to as u64 > start + len {
+        return Err("no host copy holds all of it");
+    }
+    Ok(shadow)
+}
+
+#[cfg(all(windows, feature = "native-memory"))]
+fn holder(writers: &[Writer], from: usize, to: usize) -> Result<crate::shadow::ShadowHandle, &'static str> {
+    let mut found: Option<&crate::shadow::ShadowHandle> = None;
+    for w in writers.iter().filter(|w| meet((w.from, w.to), (from, to))) {
+        match (&w.shadow, found) {
+            (None, _) => return Err("a read-back or a value behind a flight is written there"),
+            (Some(s), Some(f)) if !s.ptr_eq(f) => return Err("flights write it through two host copies"),
+            (Some(s), _) => found = Some(s),
+        }
+    }
+    let shadow = match found {
+        Some(s) => s.clone(),
+        None => crate::shadow::find(from as u64, (to - from) as u64).map(crate::shadow::ShadowHandle::Legacy).ok_or("no host copy of it")?,
     };
     let (start, len) = shadow.span();
     if shadow.in_place() || (from as u64) < start || to as u64 > start + len {
@@ -711,7 +743,10 @@ impl Host {
         let mut places: HashMap<(usize, usize, usize, u32), u64> = HashMap::default();
         // Some 2,800 fills a frame, of a few hundred places: what holds each
         // is looked for once, as long as no copy is added to the writers.
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let mut held: HashMap<(usize, usize), Arc<Shadow>> = HashMap::default();
+        #[cfg(all(windows, feature = "native-memory"))]
+        let mut held: HashMap<(usize, usize), ShadowHandle> = HashMap::default();
         let mut room = HashMap::default();
         let mut end = 0u64;
         for &(i, level) in &chosen {
@@ -732,7 +767,10 @@ impl Host {
                     from
                 }
             };
+            #[cfg(not(all(windows, feature = "native-memory")))]
             let place = (Arc::as_ptr(&from) as usize, src, len, level);
+            #[cfg(all(windows, feature = "native-memory"))]
+            let place = (from.as_ptr(), src, len, level);
             let at = match places.get(&place) {
                 Some(&at) => at,
                 None => {
