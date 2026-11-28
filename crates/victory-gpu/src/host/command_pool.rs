@@ -117,7 +117,7 @@ impl CommandPool {
                 pool_fence: self.fence.clone(),
                 in_flight_queue: std::sync::Arc::new(Mutex::new(pool.in_flight_allocators.clone())),
                 // We'll push to the actual pool's in_flight on submit
-                _pool_ref: pool as *const CommandTypePool,
+                _pool_ref: &*pool as *const CommandTypePool,
             });
         }
 
@@ -135,7 +135,7 @@ impl CommandPool {
             fence_value: 0,
             pool_fence: self.fence.clone(),
             in_flight_queue: std::sync::Arc::new(Mutex::new(pool.in_flight_allocators.clone())),
-            _pool_ref: pool as *const CommandTypePool,
+            _pool_ref: &*pool as *const CommandTypePool,
         })
     }
 
@@ -163,7 +163,7 @@ impl CommandPool {
         let fence_value = self.fence_value.fetch_add(1, Ordering::AcqRel);
         
         // Signal the fence.
-        unsafe { queue.Signal(&self.fence, fence_value)? };
+        unsafe { queue.Signal(self.fence.as_ref(), fence_value)? };
 
         // Return the allocator to the appropriate pool's in-flight queue.
         let pool = match handle.pool_type {

@@ -12,6 +12,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
+use crate::shadow::ShadowHandle;
 
 /// A set of a heap's slots, a bit for each: no lock (a pass that went through
 /// a set of 70,000 under its lock kept everyone who writes slots waiting for

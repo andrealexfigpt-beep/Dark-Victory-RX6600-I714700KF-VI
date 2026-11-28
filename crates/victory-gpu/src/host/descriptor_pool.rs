@@ -130,7 +130,7 @@ impl DescriptorHeapPool {
         let heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&heap_desc)? };
 
         let cpu_base = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
-        let gpu_base = if flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE.0 != 0 {
+        let gpu_base = if flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE != D3D12_DESCRIPTOR_HEAP_FLAG_NONE {
             unsafe { heap.GetGPUDescriptorHandleForHeapStart() }
         } else {
             D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 }
@@ -141,7 +141,7 @@ impl DescriptorHeapPool {
             descriptor_size: self.descriptor_size,
             capacity: self.max_per_heap,
             free_blocks: vec![(0, self.max_per_heap)],
-            shader_visible: flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE.0 != 0,
+            shader_visible: flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE != D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
             cpu_base,
             gpu_base,
         };

@@ -179,13 +179,6 @@ impl ShadowHandle {
     }
 }
 
-#[cfg(all(windows, not(feature = "native-memory")))]
-impl From<Arc<Shadow>> for ShadowHandle {
-    fn from(s: Arc<Shadow>) -> Self {
-        ShadowHandle::Legacy(s)
-    }
-}
-
 /// Positive proofs that ranges of one host copy were unchanged. A proof is
 /// reused only under the same write-watch/guard epoch and GPU-pending epoch;
 /// the journal check remains the fallback whenever either has moved.

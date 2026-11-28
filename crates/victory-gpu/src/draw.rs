@@ -23,6 +23,7 @@ use windows::core::Interface;
 use crate::host::HostList;
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
+use crate::shadow::ShadowHandle;
 
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
@@ -1869,7 +1870,7 @@ impl State {
         };
         let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
         let (index, shadow) = match self.root_uav_slots.get(&key) {
-            Some((index, shadow)) => (*index, address.zip(shadow.clone())),
+            Some((index, shadow)) => (*index, (address, shadow.clone())),
             None => {
                 let shadow = address.and_then(|a| crate::shadow::find_handle(a, 0).map(|s| (a, s)));
                 let Some(index) = host.dynamic(1) else {
@@ -1940,7 +1941,7 @@ impl State {
             address.unwrap_or(0) | u64::from(biased) << 63,
         );
         let (index, shadow) = match self.root_srv_slots.get(&key) {
-            Some((index, shadow)) => (*index, address.zip(shadow.clone())),
+            Some((index, shadow)) => (*index, (address, shadow.clone())),
             None => {
                 let shadow = address.and_then(|a| {
             #[cfg(all(windows, feature = "native-memory"))]
