@@ -127,8 +127,16 @@ pub(super) enum FillTo {
 /// Title memory something in the air writes: the host copy it goes through
 /// (`None`: none, the bytes reach title memory when the flight lands), from,
 /// to, and whether it is the destination of a copy done here.
+#[cfg(all(windows, feature = "native-memory"))]
 pub(super) struct Writer {
-    shadow: Option<Arc<Shadow>>,
+    shadow: Option<crate::shadow::ShadowHandle>,
+    from: usize,
+    to: usize,
+    copy: bool,
+}
+#[cfg(not(all(windows, feature = "native-memory")))]
+pub(super) struct Writer {
+    shadow: Option<std::sync::Arc<crate::shadow::Shadow>>,
     from: usize,
     to: usize,
     copy: bool,
@@ -199,7 +207,7 @@ pub(super) fn copied_read(copies: &[Writer], runs: &[&HostList]) -> bool {
         list.deferred().copies.iter().any(|step| match step {
             Step::Refresh(shadow, at, len) => copies
                 .iter()
-                .any(|w| w.from < *at + *len && *at < w.to && w.shadow.as_ref().is_none_or(|s| !Arc::ptr_eq(s, shadow))),
+                .any(|w| w.from < *at + *len && *at < w.to && w.shadow.as_ref().is_none_or(|s| !s.ptr_eq(shadow))),
             Step::Host(_, (from, to)) => copies.iter().any(|w| w.from < *to && *from < w.to),
             _ => false,
         })
@@ -442,7 +450,7 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
                 }
                 &Step::Host(_, (from, to)) if from < to => Does::Read { from, to, asked: false },
                 Step::Refresh(shadow, at, len) => Does::Refresh {
-                    shadow: Arc::as_ptr(shadow) as usize,
+                    shadow: shadow.as_ptr(),
                     from: *at,
                     to: *at + *len,
                 },

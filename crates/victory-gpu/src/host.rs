@@ -3537,6 +3537,9 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
     (!placed.is_empty() && place::read_by(runs, placed)).then_some(WHY_READ)
 }
 
+#[cfg(all(windows, feature = "native-memory"))]
+type RefreshSpan = (crate::shadow::ShadowHandle, usize, usize);
+#[cfg(not(all(windows, feature = "native-memory")))]
 type RefreshSpan = (std::sync::Arc<crate::shadow::Shadow>, usize, usize);
 
 fn framegen_submitted(runs: &[&HostList]) {
@@ -3552,6 +3555,9 @@ fn framegen_submitted(runs: &[&HostList]) {
         }
     }
 }
+#[cfg(all(windows, feature = "native-memory"))]
+type StaleSpan<'a> = (&'a crate::shadow::ShadowHandle, usize, usize);
+#[cfg(not(all(windows, feature = "native-memory")))]
 type StaleSpan<'a> = (&'a crate::shadow::Shadow, usize, usize);
 
 /// Immutable list metadata shared by the submission's write-watch query and
@@ -3563,7 +3569,7 @@ fn refresh_spans(runs: &[&HostList]) -> Vec<RefreshSpan> {
     for list in runs {
         for step in &list.deferred().copies {
             if let Step::Refresh(shadow, at, len) = step {
-                let key = std::sync::Arc::as_ptr(shadow) as usize;
+                let key = shadow.as_ptr();
                 let i = match previous {
                     Some((last, i)) if last == key => i,
                     _ => *slots.entry(key).or_insert_with(|| {
@@ -3590,7 +3596,7 @@ fn stale_under_flights(refreshes: &[RefreshSpan]) -> Vec<StaleSpan<'_>> {
     let mut spans: Vec<_> = refreshes
         .iter()
         .filter(|(shadow, _, _)| shadow.writes_pending())
-        .map(|(shadow, from, to)| (shadow.as_ref(), *from, *to))
+        .map(|(shadow, from, to)| (shadow, *from, *to))
         .collect();
     if late_exact() {
         // The title's bytes are put in beside the flights' writes; a

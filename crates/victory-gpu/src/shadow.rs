@@ -204,12 +204,52 @@ impl ShadowHandle {
         }
     }
 
+    /// Whether the copy has any pending GPU writes.
+    pub fn writes_pending(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.writes_pending(),
+            ShadowHandle::Native(_) => false, // Native backend doesn't track writes this way
+        }
+    }
+
+    /// Whether the copy has pending GPU writes in the given range.
+    pub fn writes_pending_in(&self, from: usize, to: usize) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.writes_pending_in(from, to),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Whether the memory is stale under GPU writes.
+    pub fn stale_under_writes(&self, address: usize, len: usize) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.stale_under_writes(address, len),
+            ShadowHandle::Native(_) => false, // Native backend doesn't track staleness this way
+        }
+    }
+
+    /// Merges the given range under GPU writes, returns true if merged.
+    pub fn merge_under_writes(&self, address: usize, len: usize, runs_left: &mut usize) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.merge_under_writes(address, len, runs_left),
+            ShadowHandle::Native(_) => true, // Native backend always merges
+        }
+    }
+
     /// Compare pointer equality of the inner Arc.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (ShadowHandle::Legacy(a), ShadowHandle::Legacy(b)) => std::sync::Arc::ptr_eq(a, b),
             (ShadowHandle::Native(a), ShadowHandle::Native(b)) => std::sync::Arc::ptr_eq(a, b),
             _ => false,
+        }
+    }
+
+    /// Get a unique pointer key for use as a map key.
+    pub fn as_ptr(&self) -> usize {
+        match self {
+            ShadowHandle::Legacy(a) => std::sync::Arc::as_ptr(a) as usize,
+            ShadowHandle::Native(a) => std::sync::Arc::as_ptr(a) as usize,
         }
     }
 }

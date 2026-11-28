@@ -175,7 +175,7 @@ impl CommandPool {
 
         let mut pool = pool.lock().unwrap();
         pool.in_flight_allocators.push_back(PooledAllocator {
-            allocator: handle.allocator,
+            allocator: handle.allocator.clone(),
             fence_value,
         });
 

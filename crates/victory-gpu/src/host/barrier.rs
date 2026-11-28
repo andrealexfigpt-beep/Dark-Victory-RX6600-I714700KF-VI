@@ -92,12 +92,12 @@ pub(crate) struct BarrierTracker {
     stats: BarrierStats,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 pub(crate) struct BarrierStats {
-    pub barriers_emitted: u64,
-    pub barriers_eliminated: u64,
-    pub state_transitions: u64,
-    pub unknown_resources: u64,
+    pub barriers_emitted: AtomicU64,
+    pub barriers_eliminated: AtomicU64,
+    pub state_transitions: AtomicU64,
+    pub unknown_resources: AtomicU64,
 }
 
 impl BarrierTracker {
@@ -131,7 +131,7 @@ impl BarrierTracker {
         let ptr = resource.as_raw() as usize;
         let mut resources = self.resources.lock().unwrap();
         let entry = resources.entry(ptr).or_insert_with(|| {
-            self.stats.unknown_resources += 1;
+            self.stats.unknown_resources.fetch_add(1, Ordering::Relaxed);
             TrackedResource::new(resource.clone(), ResourceState::Common)
         });
         entry.last_submission = self.current_submission.load(Ordering::Acquire);
@@ -152,7 +152,7 @@ impl BarrierTracker {
             let ptr = resource.as_raw() as usize;
             
             let entry = resources.entry(ptr).or_insert_with(|| {
-                self.stats.unknown_resources += 1;
+                self.stats.unknown_resources.fetch_add(1, Ordering::Relaxed);
                 TrackedResource::new(resource.clone(), ResourceState::Common)
             });
 
@@ -179,11 +179,11 @@ impl BarrierTracker {
                 entry.last_submission = self.current_submission.load(Ordering::Acquire);
                 entry.known = true;
                 
-                self.stats.barriers_emitted += 1;
-                self.stats.state_transitions += 1;
+                self.stats.barriers_emitted.fetch_add(1, Ordering::Relaxed);
+                self.stats.state_transitions.fetch_add(1, Ordering::Relaxed);
             } else {
                 // No barrier needed - state already matches.
-                self.stats.barriers_eliminated += 1;
+                self.stats.barriers_eliminated.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -223,7 +223,12 @@ impl BarrierTracker {
 
     /// Get statistics.
     pub(crate) fn stats(&self) -> BarrierStats {
-        self.stats
+        BarrierStats {
+            barriers_emitted: AtomicU64::new(self.stats.barriers_emitted.load(Ordering::Relaxed)),
+            barriers_eliminated: AtomicU64::new(self.stats.barriers_eliminated.load(Ordering::Relaxed)),
+            state_transitions: AtomicU64::new(self.stats.state_transitions.load(Ordering::Relaxed)),
+            unknown_resources: AtomicU64::new(self.stats.unknown_resources.load(Ordering::Relaxed)),
+        }
     }
 
     /// Clean up resources not used in recent submissions.
@@ -326,7 +331,7 @@ mod tests {
         assert_eq!(submission, 1);
         
         let stats = tracker.stats();
-        assert_eq!(stats.barriers_emitted, 0);
-        assert_eq!(stats.barriers_eliminated, 0);
+        assert_eq!(stats.barriers_emitted.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.barriers_eliminated.load(Ordering::Relaxed), 0);
     }
 }

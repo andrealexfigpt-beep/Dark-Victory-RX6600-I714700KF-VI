@@ -58,13 +58,13 @@ pub(crate) struct DescriptorHeapPool {
     stats: HeapPoolStats,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 pub(crate) struct HeapPoolStats {
-    pub heaps_created: u64,
-    pub allocations: u64,
-    pub deallocations: u64,
-    pub current_allocated: u64,
-    pub peak_allocated: u64,
+    pub heaps_created: AtomicU64,
+    pub allocations: AtomicU64,
+    pub deallocations: AtomicU64,
+    pub current_allocated: AtomicU64,
+    pub peak_allocated: AtomicU64,
 }
 
 impl DescriptorHeapPool {
@@ -110,9 +110,13 @@ impl DescriptorHeapPool {
         for (heap_index, heap) in heaps.iter_mut().enumerate() {
             if let Some((start, _)) = heap.find_free_block(count) {
                 let block = heap.allocate_block(heap_index as u32, start, count);
-                self.stats.allocations += 1;
-                self.stats.current_allocated += count as u64;
-                self.stats.peak_allocated = self.stats.peak_allocated.max(self.stats.current_allocated);
+                self.stats.allocations.fetch_add(1, Ordering::Relaxed);
+                self.stats.current_allocated.fetch_add(count as u64, Ordering::Relaxed);
+                let current = self.stats.current_allocated.load(Ordering::Relaxed);
+                let peak = self.stats.peak_allocated.load(Ordering::Relaxed);
+                if current > peak {
+                    self.stats.peak_allocated.store(current, Ordering::Relaxed);
+                }
                 return Ok(block);
             }
         }
@@ -154,10 +158,14 @@ impl DescriptorHeapPool {
         let block = new_heap.allocate_block(heaps.len() as u32, 0, count);
         heaps.push(new_heap);
 
-        self.stats.heaps_created += 1;
-        self.stats.allocations += 1;
-        self.stats.current_allocated += count as u64;
-        self.stats.peak_allocated = self.stats.peak_allocated.max(self.stats.current_allocated);
+        self.stats.heaps_created.fetch_add(1, Ordering::Relaxed);
+        self.stats.allocations.fetch_add(1, Ordering::Relaxed);
+        self.stats.current_allocated.fetch_add(count as u64, Ordering::Relaxed);
+        let current = self.stats.current_allocated.load(Ordering::Relaxed);
+        let peak = self.stats.peak_allocated.load(Ordering::Relaxed);
+        if current > peak {
+            self.stats.peak_allocated.store(current, Ordering::Relaxed);
+        }
 
         Ok(block)
     }
@@ -167,8 +175,8 @@ impl DescriptorHeapPool {
         let mut heaps = self.heaps.lock().unwrap();
         if (block.heap_index as usize) < heaps.len() {
             heaps[block.heap_index as usize].free_block(block.start, block.count);
-            self.stats.deallocations += 1;
-            self.stats.current_allocated = self.stats.current_allocated.saturating_sub(block.count as u64);
+            self.stats.deallocations.fetch_add(1, Ordering::Relaxed);
+            self.stats.current_allocated.fetch_sub(block.count as u64, Ordering::Relaxed);
         }
     }
 
