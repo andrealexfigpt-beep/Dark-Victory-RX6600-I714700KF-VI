@@ -37,9 +37,9 @@ pub(crate) fn texture_state(state: u32) -> u32 {
 /// ring of host descriptors is enough.
 const RTV_RING: u32 = 1024;
 
-pub(crate) struct Host {
-    pub(crate) device: ID3D12Device,
-    queue: ID3D12CommandQueue,
+pub struct Host {
+    pub device: ID3D12Device,
+    pub queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
     /// The last value signalled on `fence`, behind the submission lock.
     submitted: Mutex<u64>,
@@ -829,14 +829,20 @@ pub(crate) fn made_host() -> Option<&'static Host> {
 
 /// The host GPU, created on first use; `None` without one (a run then
 /// behaves as before: nothing executes).
-pub(crate) fn host() -> Option<&'static Host> {
+pub fn host() -> Option<&'static Host> {
     HOST.get_or_init(|| match create() {
         Ok(host) => {
+            let initialized = crate::host::descriptor_pool::init_descriptor_pools(&host.device)
+                .and_then(|_| crate::host::queue::init_queue_manager(&host.device));
+            if let Err(error) = initialized { tracing::error!(%error, "host GPU pool initialization failed"); return None; }
+            crate::host::barrier::init_barrier_tracker();
+            crate::host::binding::set_binding_config(crate::host::binding::BindingConfig::native_default());
             // Initialize memory backend after host is created
             let device = Arc::new(host.device.clone());
             let copy_queue = host.copy_queue();
-            if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
-                tracing::warn!(error = %e, "failed to initialize memory backend");
+            if let Err(e) = crate::memory_backend::init_memory_backend_auto(device, copy_queue) {
+                tracing::error!(error = %e, "failed to initialize native memory backend");
+                return None;
             }
             Some(host)
         }
@@ -1010,24 +1016,7 @@ fn create() -> windows::core::Result<Host> {
             .ok();
         tracing::info!("host D3D12 device ready");
         
-        // Initialize binding configuration (Phase 3 Native Graphics).
-        crate::host::binding::set_binding_config(crate::host::binding::BindingConfig::native_default());
-        
-        // Initialize descriptor heap pools (Phase 3 Native Graphics).
-        crate::host::descriptor_pool::init_descriptor_pools(&device)?;
-        
-        // Initialize command pool (Phase 3 Native Graphics).
         let command_pool = crate::host::command_pool::CommandPool::new(&device)?;
-        
-        // Initialize barrier tracker (Phase 3 Native Graphics).
-        crate::host::barrier::init_barrier_tracker();
-        
-        // Initialize async queue manager (Phase 3 Native Graphics).
-        crate::host::queue::init_queue_manager(&device)?;
-        
-        // Initialize budget-aware memory manager (Phase 3 Native Graphics).
-        crate::host::memory_mgr::init_memory_manager(&device, adapter.clone());
-        
         Ok(Host {
             device,
             queue,
@@ -3117,6 +3106,19 @@ fn late_writes() -> bool {
 
 /// Per host copy, the ranges a submission's shaders may write, as declared
 /// (address, end).
+fn with_picked(mut declared: Vec<Declared>, picked: &[crate::picked::Range]) -> Vec<Declared> {
+    for (copy, at, len) in picked {
+        let copy = crate::shadow::ShadowHandle::Legacy(copy.clone());
+        let range = (*at, *at + *len);
+        match declared.iter_mut().find(|(s, _)| s.ptr_eq(&copy)) {
+            Some((_, ranges)) if ranges.contains(&range) => {},
+            Some((_, ranges)) => ranges.push(range),
+            None => declared.push((copy, vec![range])),
+        }
+    }
+    declared
+}
+
 type Declared = (crate::shadow::ShadowHandle, Vec<(usize, usize)>);
 
 /// What [`Host::submit`] hands back for a submission it sent and did not
@@ -4006,6 +4008,7 @@ fn relay_worker() {
 /// the merge.
 struct RelayBack {
     work: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
+    native: Vec<(crate::shadow::ShadowHandle, usize, usize)>,
     found: Option<Vec<Vec<(usize, usize)>>>,
 }
 
@@ -4022,7 +4025,12 @@ fn relay_hand_back(back: &[Declared]) -> RelayBack {
         }
         work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
     }
-    RelayBack { work, found: None }
+    let mut native = Vec::new();
+    let work = work.into_iter().filter_map(|(s, a, b)| match s {
+        crate::shadow::ShadowHandle::Legacy(s) => Some((s, a, b)),
+        s => { native.push((s, a, b)); None }
+    }).collect();
+    RelayBack { work, native, found: None }
 }
 
 impl RelayBack {
@@ -4036,7 +4044,7 @@ impl RelayBack {
         // later flight writing, the title's bytes going in) is found now or
         // by that flight's landing, and the merge looks again under the
         // lock.
-        self.found = Some(crate::shadow::find_all(&self.work));
+        self.found = Some(crate::shadow::find_all(&self.work.iter().map(|(s, a, b)| (s.clone().into(), *a, *b)).collect::<Vec<_>>()));
         crate::land::spent(stat, scanning);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::BackScanUs, scanning.elapsed().as_micros() as u64);
@@ -4046,6 +4054,7 @@ impl RelayBack {
     fn merge(mut self) {
         use crate::land;
         self.look(land::stat::SCAN);
+        for (s, from, to) in &self.native { s.copy_back(*from, to - from); }
         let Some(found) = self.found else {
             return;
         };
@@ -4219,12 +4228,12 @@ mod torn;
 #[cfg(feature = "diagnostics")]
 mod traffic;
 pub(crate) mod upcheck;
-pub(crate) mod command_pool;
-pub(crate) mod descriptor_pool;
-pub(crate) mod binding;
-pub(crate) mod barrier;
-pub(crate) mod queue;
-pub(crate) mod memory_mgr;
+pub mod command_pool;
+pub mod descriptor_pool;
+pub mod binding;
+pub mod barrier;
+pub mod queue;
+pub mod memory_mgr;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
@@ -4773,7 +4782,7 @@ impl Host {
             return None;
         }
         // The ranges this submission's shaders may write, per copy.
-        let declared: Vec<Declared> = declared.iter().filter(|(shadow, _)| shadow.carded()).cloned().collect();
+        let declared: Vec<_> = declared.iter().filter_map(|(shadow, ranges)| match shadow { crate::shadow::ShadowHandle::Legacy(s) if s.carded() => Some((s.clone(), ranges.clone())), _ => None }).collect();
         let declared = if crate::picked::lands() { crate::picked::with(declared, &picked.written) } else { declared };
         // (Of a copy with a declared range here, that says it.)
         let looked: Vec<&crate::picked::Range> =
@@ -6283,7 +6292,7 @@ impl Host {
             self.retire_state_preludes(*submitted, preludes);
             #[cfg(feature = "diagnostics")]
             split.part(5);
-            let back = crate::picked::with(declared, &picked.written);
+            let back = with_picked(declared, &picked.written);
             let mut texture_back_ranges = Vec::new();
             for list in runs {
                 texture_back_ranges.extend(list.deferred().texture_backs.iter().map(crate::texback::Back::range));
@@ -6417,7 +6426,7 @@ impl Host {
         if let Some(card) = &card {
             self.card_back(card, &mut submitted, &mut std::collections::HashSet::new());
         }
-        let back = crate::picked::with(declared, &picked.written);
+        let back = with_picked(declared, &picked.written);
         hand_back(&back);
         if let Some(card) = card {
             self.card_done(card);
@@ -8131,7 +8140,7 @@ mod wide_refresh_tests {
 /// once, it is checked again only after a step that writes title memory.
 #[derive(Default)]
 struct Batch {
-    refreshes: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
+    refreshes: Vec<(crate::shadow::ShadowHandle, usize, usize)>,
     /// Where each copy (by address) is in `refreshes`: the list that makes
     /// the heap's buffers ready adds some 4,100 copies, and searching them
     /// for every refresh of a submission was tens of millions of
@@ -8389,9 +8398,9 @@ impl Batch {
     const REFRESH_GROUP: usize = 16;
     const REFRESH_PARALLEL_FILTER: usize = 256;
 
-    fn add(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>, address: usize, len: usize) {
+    fn add(&mut self, shadow: &crate::shadow::ShadowHandle, address: usize, len: usize) {
         let end = address + len;
-        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let key = shadow.as_ptr();
         if self.ahead.get(&key).is_some_and(|&(from, to)| from <= address && end <= to) {
             return;
         }
@@ -8409,19 +8418,19 @@ impl Batch {
 
     /// Before shaders are given a range of `shadow`'s copy: its pending
     /// refresh is done, the others stay pending.
-    fn flush_one(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>) {
+    fn flush_one(&mut self, shadow: &crate::shadow::ShadowHandle) {
         // From here on it is refreshed around what the shaders write. (What
         // is in front of all the steps was, up to here.)
         if !self.front {
-            self.ahead.remove(&(std::sync::Arc::as_ptr(shadow) as usize));
+            self.ahead.remove(&(shadow.as_ptr()));
         }
-        let Some(at) = self.index.remove(&(std::sync::Arc::as_ptr(shadow) as usize)) else {
+        let Some(at) = self.index.remove(&(shadow.as_ptr())) else {
             return;
         };
         let (shadow, from, to) = self.refreshes.swap_remove(at);
         // The last entry took its place.
         if let Some(moved) = self.refreshes.get(at) {
-            self.index.insert(std::sync::Arc::as_ptr(&moved.0) as usize, at);
+            self.index.insert(moved.0.as_ptr(), at);
         }
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
@@ -8438,7 +8447,7 @@ impl Batch {
     }
 
     /// Brings `[from, to)` of a copy up to date, timed.
-    fn update(shadow: &crate::shadow::Shadow, from: usize, to: usize) {
+    fn update(shadow: &crate::shadow::ShadowHandle, from: usize, to: usize) {
         let started = std::time::Instant::now();
         let _one = crate::timeline::span("a copy's refresh");
         let copied = shadow.update(from, to - from);
@@ -8449,7 +8458,7 @@ impl Batch {
         PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
     }
 
-    fn refresh_group(refreshes: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)], group: usize, width: usize) {
+    fn refresh_group(refreshes: &[(crate::shadow::ShadowHandle, usize, usize)], group: usize, width: usize) {
         let from = group * width;
         let to = (from + width).min(refreshes.len());
         #[cfg(feature = "diagnostics")]
@@ -8565,7 +8574,7 @@ impl Batch {
     /// Before the steps of `runs` ([`ahead_of_writes`]); copies and fills
     /// that `taken` names are not done on the CPU.
     fn refresh_ahead(&mut self, runs: &[&HostList], taken: impl Fn(&HostList, usize) -> bool) {
-        let mut copies: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
+        let mut copies: ByCopy<crate::shadow::ShadowHandle> = ByCopy::default();
         let mut touches = Vec::new();
         'steps: for list in runs {
             for (i, step) in list.deferred().copies.iter().enumerate() {
@@ -10894,7 +10903,7 @@ mod refresh_tests {
         let mut batch = Batch::default();
         for part in ranges.chunks(ranges.len().div_ceil(flushes).max(1)) {
             for (shadow, at, len) in part {
-                batch.add(shadow, *at, *len);
+                batch.add(&shadow.clone().into(), *at, *len);
             }
             batch.flush();
         }

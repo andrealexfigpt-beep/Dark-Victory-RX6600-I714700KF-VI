@@ -22,23 +22,23 @@ use crate::host::host;
 
 /// Memory budget configuration.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct MemoryBudget {
+pub struct MemoryBudget {
     /// Total VRAM budget in bytes (0 = auto from adapter).
-    pub(crate) vram_budget: u64,
+    pub vram_budget: u64,
     /// Total shared system memory budget in bytes (0 = auto).
-    pub(crate) shared_budget: u64,
+    pub shared_budget: u64,
     /// Target VRAM usage ratio (0.0-1.0) before eviction starts.
-    pub(crate) vram_target_ratio: f64,
+    pub vram_target_ratio: f64,
     /// Target shared memory usage ratio before eviction starts.
-    pub(crate) shared_target_ratio: f64,
+    pub shared_target_ratio: f64,
     /// Minimum free VRAM to keep (bytes).
-    pub(crate) vram_reserve: u64,
+    pub vram_reserve: u64,
     /// Minimum free shared memory to keep (bytes).
-    pub(crate) shared_reserve: u64,
+    pub shared_reserve: u64,
     /// Streaming budget for dynamic allocations per frame (bytes).
-    pub(crate) streaming_budget_per_frame: u64,
+    pub streaming_budget_per_frame: u64,
     /// Maximum streaming allocation size (bytes).
-    pub(crate) max_streaming_allocation: u64,
+    pub max_streaming_allocation: u64,
 }
 
 impl Default for MemoryBudget {
@@ -146,7 +146,7 @@ pub(crate) struct PendingReclamation {
 }
 
 #[derive(Default, Clone, Copy)]
-pub(crate) struct MemoryStats {
+pub struct MemoryStats {
     pub vram_used: u64,
     pub vram_budget: u64,
     pub shared_used: u64,
@@ -232,7 +232,7 @@ impl MemoryManager {
     /// Detect ReBAR support (PCIe Resizable BAR).
     fn detect_rebar_support(adapter: Option<&IDXGIAdapter3>) -> bool {
         if let Some(adapter) = adapter {
-            if let Ok(desc) = adapter.GetDesc1() {
+            if let Ok(desc) = unsafe { adapter.GetDesc1() } {
                 if desc.VendorId == 0x1002 && desc.DeviceId >= 0x7300 && desc.DeviceId <= 0x73FF {
                     return true;
                 }
@@ -243,15 +243,13 @@ impl MemoryManager {
     
     /// Detect GPU upload heap support.
     fn detect_upload_heap_support(device: &ID3D12Device) -> bool {
-        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
-        if device.CheckFeatureSupport(
-            D3D12_FEATURE_D3D12_OPTIONS,
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+        // SAFETY: options has the size and layout required by OPTIONS16.
+        unsafe { device.CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS16,
             (&raw mut options).cast(),
             size_of_val(&options) as u32,
-        ).is_ok() {
-            return true;
-        }
-        false
+        ) }.is_ok() && options.GPUUploadHeapSupported.as_bool()
     }
 
     /// Update the current submission counter and process reclamation.
@@ -655,9 +653,8 @@ impl MemoryManager {
 static MEMORY_MANAGER: OnceLock<MemoryManager> = OnceLock::new();
 
 /// Initialize the memory manager.
-pub(crate) fn init_memory_manager(device: &ID3D12Device, adapter: Option<IDXGIAdapter3>) {
-    let manager = MemoryManager::new(device, adapter);
-    MEMORY_MANAGER.set(manager).ok();
+pub fn init_memory_manager(device: &ID3D12Device, adapter: Option<IDXGIAdapter3>) {
+    MEMORY_MANAGER.get_or_init(|| MemoryManager::new(device, adapter));
 }
 
 /// Get the global memory manager.
@@ -711,7 +708,7 @@ pub(crate) fn try_allocate_memory(size: u64, is_vram: bool) -> bool {
 }
 
 /// Get memory statistics.
-pub(crate) fn memory_stats() -> MemoryStats {
+pub fn memory_stats() -> MemoryStats {
     memory_manager().stats()
 }
 

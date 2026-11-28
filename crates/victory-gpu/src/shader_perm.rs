@@ -259,8 +259,6 @@ struct PermutationTracker {
     pipeline_shader_map: RwLock<HashMap<String, Vec<ShaderPermutationKey>>>,
     /// Frame counter
     frame: std::sync::atomic::AtomicU64,
-    /// Whether to persist permutations to disk
-    persist_enabled: bool,
     /// Persistence directory
     persist_dir: Mutex<Option<PathBuf>>,
 }
@@ -271,7 +269,6 @@ impl PermutationTracker {
             permutations: RwLock::new(HashMap::new()),
             pipeline_shader_map: RwLock::new(HashMap::new()),
             frame: std::sync::atomic::AtomicU64::new(0),
-            persist_enabled: false,
             persist_dir: Mutex::new(None),
         }
     }
@@ -279,7 +276,6 @@ impl PermutationTracker {
     /// Enable persistence to disk.
     pub fn enable_persistence(&self, dir: PathBuf) {
         *self.persist_dir.lock().unwrap() = Some(dir);
-        self.persist_enabled = true;
     }
 
     /// Record a shader translation.

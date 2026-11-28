@@ -811,13 +811,13 @@ impl Host {
             let mut writes = Vec::new();
             for op in ops.iter().filter(|op| op.level == level) {
                 let len = op.len as u64;
-                let read = (&op.from.0.buffer, op.from.0.offset(op.from.1 as u64), op.at, len);
+                let read = (op.from.0.resource(), op.from.0.offset(op.from.1 as u64), op.at, len);
                 // (Each place once.)
-                if places.remove(&(Arc::as_ptr(&op.from.0) as usize, op.from.1, op.len, level)).is_some() {
+                if places.remove(&(op.from.0.as_ptr(), op.from.1, op.len, level)).is_some() {
                     reads.push(read);
                 }
                 match &op.to {
-                    To::Copy(to, dst) => writes.push((&to.buffer, to.offset(*dst as u64), op.at, len)),
+                    To::Copy(to, dst) => writes.push((to.resource(), to.offset(*dst as u64), op.at, len)),
                     To::Buffer(buffer) => writes.push((buffer, 0, op.at, len)),
                     To::Slot(..) => {}
                 }

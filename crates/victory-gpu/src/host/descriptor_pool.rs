@@ -187,8 +187,8 @@ impl DescriptorHeapPool {
     }
 
     /// Get pool statistics.
-    pub(crate) fn stats(&self) -> HeapPoolStats {
-        self.stats
+    pub(crate) fn stats(&self) -> &HeapPoolStats {
+        &self.stats
     }
 }
 
@@ -300,13 +300,16 @@ static RTV_POOL: std::sync::OnceLock<DescriptorHeapPool> = std::sync::OnceLock::
 static DSV_POOL: std::sync::OnceLock<DescriptorHeapPool> = std::sync::OnceLock::new();
 
 /// Initialize all descriptor heap pools.
-pub(crate) fn init_descriptor_pools(device: &ID3D12Device) -> windows::core::Result<()> {
+pub fn init_descriptor_pools(device: &ID3D12Device) -> windows::core::Result<()> {
+    static INIT: Mutex<()> = Mutex::new(());
+    let _guard = INIT.lock().unwrap();
+    if DSV_POOL.get().is_some() { return Ok(()); }
     // CBV/SRV/UAV pool: 1M descriptors per heap (shader visible)
     CBV_SRV_UAV_POOL.set(DescriptorHeapPool::new(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1_000_000)?)
         .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
 
     // Sampler pool: 64K descriptors per heap (shader visible)
-    SAMPLER_POOL.set(DescriptorHeapPool::new(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 65_536)?)
+    SAMPLER_POOL.set(DescriptorHeapPool::new(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2048)?)
         .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
 
     // RTV pool: 4K descriptors per heap (not shader visible)

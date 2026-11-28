@@ -111,7 +111,7 @@ impl BarrierTracker {
 
     /// Start a new submission.
     pub(crate) fn new_submission(&self) -> u64 {
-        self.current_submission.fetch_add(1, Ordering::AcqRel)
+        self.current_submission.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Get the current submission number.
@@ -248,7 +248,7 @@ pub(crate) fn barrier_tracker() -> &'static BarrierTracker {
 }
 
 /// Initialize the barrier tracker.
-pub(crate) fn init_barrier_tracker() {
+pub fn init_barrier_tracker() {
     BARRIER_TRACKER.get_or_init(BarrierTracker::new);
 }
 

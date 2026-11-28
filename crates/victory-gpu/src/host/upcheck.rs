@@ -844,7 +844,7 @@ mod tests {
         };
         assert!(crate::picked::on(), "set VICTORY_PICKED_WRITES=1");
         let (title, start, shadow) = title(0x6666, true);
-        crate::picked::shown(vec![(shadow.clone(), start as u64, (start + LEN) as u64)], true);
+        crate::picked::shown(vec![(shadow.clone().into(), start as u64, (start + LEN) as u64)], true);
         let at = (37 << 16) + 512;
         let mut lists = Vec::new();
         let mut back = Vec::new();

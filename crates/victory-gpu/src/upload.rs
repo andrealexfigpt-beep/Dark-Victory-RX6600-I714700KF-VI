@@ -35,8 +35,6 @@ enum Kind {
     /// Address, bytes.
     Low(usize, usize),
     Heap(Vec<u8>),
-    /// Native backend ring buffer: (offset, pointer, length).
-    NativeRing(u64, *mut u8, usize),
 }
 
 fn low() -> bool {
@@ -91,13 +89,7 @@ pub(crate) fn reserve(len: usize) -> Option<usize> {
 
 impl Upload {
     pub(crate) fn new(len: usize) -> Option<Upload> {
-        // Always use native backend's upload ring buffer when available
-        if let Some(backend) = crate::memory_backend::memory_backend() {
-            // Use native backend's upload ring buffer via trait method
-            let (offset, ptr) = backend.allocate_upload(len as u64, crate::native_mem::UPLOAD_ALIGNMENT)?;
-            return Some(Upload(Kind::NativeRing(offset, ptr, len)));
-        }
-        
+        // Title-visible upload addresses must fit the shader's address width.
         if !low() {
             return Some(Upload(Kind::Heap(vec![0; len])));
         }
@@ -127,7 +119,6 @@ impl Upload {
         match &mut self.0 {
             Kind::Low(at, _) => *at as *mut u8,
             Kind::Heap(block) => block.as_mut_ptr(),
-            Kind::NativeRing(_, ptr, _) => *ptr,
         }
     }
 }
@@ -146,10 +137,6 @@ impl Drop for Upload {
             }
             Kind::Heap(_) => {
                 // Heap memory is automatically freed when the Vec is dropped
-            }
-            Kind::NativeRing(_, _, _) => {
-                // Native ring buffer manages its own lifecycle; no action needed on drop
-                // The ring buffer's offset will be reused when the fence allows it
             }
         }
     }

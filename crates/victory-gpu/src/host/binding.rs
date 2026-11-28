@@ -40,7 +40,7 @@ pub(crate) enum ResourceBinding {
 
 /// Configuration for binding optimization.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct BindingConfig {
+pub struct BindingConfig {
     /// Prefer direct root descriptors when safe (default: true for native).
     pub(crate) prefer_direct: bool,
     /// Enable bounds checking via descriptor tables.
@@ -51,7 +51,7 @@ pub(crate) struct BindingConfig {
 
 impl BindingConfig {
     /// Default configuration for native graphics path.
-    pub(crate) fn native_default() -> Self {
+    pub fn native_default() -> Self {
         Self {
             prefer_direct: true,
             enable_bounds_check: false, // We manage bounds for our resources
@@ -73,7 +73,7 @@ impl BindingConfig {
 static BINDING_CONFIG: OnceLock<BindingConfig> = OnceLock::new();
 
 /// Set the binding configuration (call once at startup).
-pub(crate) fn set_binding_config(config: BindingConfig) {
+pub fn set_binding_config(config: BindingConfig) {
     BINDING_CONFIG.set(config).ok();
 }
 

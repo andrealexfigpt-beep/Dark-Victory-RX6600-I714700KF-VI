@@ -208,8 +208,8 @@ impl CommandPool {
     }
 
     /// Get pool statistics.
-    pub(crate) fn stats(&self) -> PoolStats {
-        self.stats
+    pub(crate) fn stats(&self) -> &PoolStats {
+        &self.stats
     }
 }
 
@@ -276,7 +276,7 @@ impl Drop for PooledAllocatorHandle {
 static COMMAND_POOL: std::sync::OnceLock<CommandPool> = std::sync::OnceLock::new();
 
 /// Initialize the command pool.
-pub(crate) fn init_command_pool(device: &ID3D12Device) -> windows::core::Result<()> {
+pub fn init_command_pool(device: &ID3D12Device) -> windows::core::Result<()> {
     let pool = CommandPool::new(device)?;
     COMMAND_POOL.set(pool).map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
 }
@@ -297,14 +297,14 @@ mod tests {
         
         // Test getting a direct allocator
         let handle = pool.get_direct_allocator().expect("Failed to get direct allocator");
-        assert!(!handle.allocator().is_null());
+        assert!(!handle.allocator().as_raw().is_null());
         
         // Test creating a list from it
         let list = handle.create_list().expect("Failed to create list");
-        assert!(!list.is_null());
+        assert!(!list.as_raw().is_null());
         
         // Test getting a copy allocator
         let handle = pool.get_copy_allocator().expect("Failed to get copy allocator");
-        assert!(!handle.allocator().is_null());
+        assert!(!handle.allocator().as_raw().is_null());
     }
 }

@@ -8,35 +8,30 @@
 //! - Memory consumption and allocation lookup performance
 //! - Aliasing and resource lifetime correctness
 
+use std::sync::Arc;
+use victory_gpu::native_mem::{NativeMemory, PAGE};
+use windows::Win32::Graphics::{Direct3D::D3D_FEATURE_LEVEL_12_0, Direct3D12::*, Dxgi::{*, Common::*}};
+
+fn create_test_device() -> (Arc<ID3D12Device>, Arc<ID3D12CommandQueue>) {
+    let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }.unwrap();
+    for index in 0.. {
+        let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE) }.expect("physical D3D12 adapter");
+        let desc = unsafe { adapter.GetDesc1() }.unwrap();
+        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 { continue; }
+        let mut device: Option<ID3D12Device> = None;
+        if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device) }.is_err() { continue; }
+        let device = device.unwrap();
+        eprintln!("D3D12 physical adapter: {}", String::from_utf16_lossy(&desc.Description).trim_end_matches(char::from(0)));
+        let queue = unsafe { device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_COPY, ..Default::default() }) }.unwrap();
+        return (Arc::new(device), Arc::new(queue));
+    }
+    unreachable!()
+}
+
 mod native_mem_tests {
-    use std::sync::Arc;
+    use super::*;
     use std::thread;
     use std::time::Instant;
-
-    use windows::Win32::Graphics::Direct3D12::*;
-    use windows::Win32::Graphics::Dxgi::*;
-    use windows::Win32::Graphics::Dxgi::Common::*;
-
-    use fastrand;
-    use victory_gpu::native_mem::{NativeMemory, PAGE};
-    use victory_gpu::host::{host, Host};
-
-    /// Create a test D3D12 device and copy queue.
-    fn create_test_device() -> (Arc<ID3D12Device>, Arc<ID3D12CommandQueue>) {
-        let host = host().expect("Failed to get host");
-        let device = host.device.clone();
-
-        // Create a copy queue
-        let queue_desc = D3D12_COMMAND_QUEUE_DESC {
-            Type: D3D12_COMMAND_LIST_TYPE_COPY,
-            Priority: 0,
-            Flags: D3D12_COMMAND_QUEUE_FLAGS(0),
-            NodeMask: 0,
-        };
-        let copy_queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&queue_desc) }.expect("Failed to create copy queue");
-
-        (device, Arc::new(copy_queue))
-    }
 
     #[test]
     fn test_basic_allocation() {
@@ -72,7 +67,7 @@ mod native_mem_tests {
 
         let alloc = mem.get_allocation(va);
         assert!(alloc.is_some());
-        assert!(alloc.unwrap().placeholder);
+        assert!(alloc.as_ref().unwrap().placeholder);
         assert_eq!(alloc.unwrap().committed_size, 0);
 
         // Free it
@@ -90,7 +85,7 @@ mod native_mem_tests {
         mem.allocate(va, size, 0x04, false).expect("Allocation failed");
 
         // Create GPU resource bound to this VA
-        let gpu_va = mem.create_gpu_resource(va, size, true).expect("GPU resource creation failed");
+        let gpu_va = mem.create_gpu_resource(va, size, true).expect("GPU resource creation failed").gpu_va;
         assert_ne!(gpu_va, 0, "GPU VA should not be zero");
 
         // Verify binding
@@ -163,7 +158,7 @@ mod native_mem_tests {
 
         for (va, size) in resources {
             mem.allocate(va, size, 0x04, false).expect(&format!("Allocation failed for {:#x}", va));
-            let gpu_va = mem.create_gpu_resource(va, size, true).expect(&format!("GPU resource failed for {:#x}", va));
+            let gpu_va = mem.create_gpu_resource(va, size, true).expect(&format!("GPU resource failed for {:#x}", va)).gpu_va;
             assert_ne!(gpu_va, 0);
         }
 
@@ -186,7 +181,7 @@ mod native_mem_tests {
 
         // Pre-populate with allocations
         for i in 0..1000 {
-            let va = 0x7000_0000 + i * PAGE * 4;
+            let va = 0x7000_0000 + i as u64 * PAGE * 4;
             mem.allocate(va, PAGE, 0x04, false).expect("Pre-populate failed");
         }
 
@@ -196,7 +191,7 @@ mod native_mem_tests {
             thread::spawn(move || {
                 for _ in 0..10000 {
                     let idx = fastrand::usize(0..1000);
-                    let va = 0x7000_0000 + idx * PAGE * 4;
+                    let va = 0x7000_0000 + idx as u64 * PAGE * 4;
                     let _ = mem.get_allocation(va);
                     let _ = mem.get_gpu_va(va);
                 }
@@ -216,7 +211,7 @@ mod native_mem_tests {
         // Allocate many resources to trigger arena growth
         let mut vas = Vec::new();
         for i in 0..200 {
-            let va = 0x8000_0000 + i * PAGE * 4;
+            let va = 0x8000_0000 + i as u64 * PAGE * 4;
             let size = PAGE * 2;
             mem.allocate(va, size, 0x04, false).expect(&format!("Allocation {} failed", i));
             mem.create_gpu_resource(va, size, true).expect(&format!("GPU resource {} failed", i));
@@ -244,7 +239,7 @@ mod native_mem_tests {
         let size = 16 * 1024 * 1024; // 16 MiB
         mem.allocate(va, size, 0x04, false).expect("Large allocation failed");
 
-        let gpu_va = mem.create_gpu_resource(va, size, true).expect("Large GPU resource failed");
+        let gpu_va = mem.create_gpu_resource(va, size, true).expect("Large GPU resource failed").gpu_va;
         assert_ne!(gpu_va, 0);
 
         // Upload and readback large data
@@ -270,7 +265,7 @@ mod native_mem_tests {
         mem.allocate(va, size, 0x04, false).expect("Allocation failed");
 
         // Create with UAV
-        let gpu_va_uav = mem.create_gpu_resource(va, size, true).expect("UAV resource failed");
+        let gpu_va_uav = mem.create_gpu_resource(va, size, true).expect("UAV resource failed").gpu_va;
         assert_ne!(gpu_va_uav, 0);
 
         mem.free(va);
@@ -278,7 +273,7 @@ mod native_mem_tests {
         // Create without UAV
         let va2 = 0xA100_0000;
         mem.allocate(va2, size, 0x04, false).expect("Allocation 2 failed");
-        let gpu_va_no_uav = mem.create_gpu_resource(va2, size, false).expect("Non-UAV resource failed");
+        let gpu_va_no_uav = mem.create_gpu_resource(va2, size, false).expect("Non-UAV resource failed").gpu_va;
         assert_ne!(gpu_va_no_uav, 0);
     }
 
@@ -315,8 +310,8 @@ mod native_mem_tests {
         mem.allocate(va1, size, 0x04, false).expect("Alloc 1 failed");
         mem.allocate(va2, size, 0x04, false).expect("Alloc 2 failed");
 
-        let gpu_va1 = mem.create_gpu_resource(va1, size, true).expect("GPU 1 failed");
-        let gpu_va2 = mem.create_gpu_resource(va2, size, true).expect("GPU 2 failed");
+        let gpu_va1 = mem.create_gpu_resource(va1, size, true).expect("GPU 1 failed").gpu_va;
+        let gpu_va2 = mem.create_gpu_resource(va2, size, true).expect("GPU 2 failed").gpu_va;
 
         // They should have different GPU VAs
         assert_ne!(gpu_va1, gpu_va2);
@@ -341,21 +336,22 @@ mod native_mem_tests {
         let alias_va = 0xD100_0000;
         let alias_gpu_va = mem.create_aliased_resource(alias_va, source_va, size, true).expect("Aliased resource failed");
 
-        // Aliased resource should have different GPU VA but same heap offset
-        assert_ne!(source_gpu_va, alias_gpu_va);
+        // Distinct resource objects alias the same heap range.
+        assert_ne!(source_gpu_va.resource(), alias_gpu_va.resource());
         assert!(mem.has_gpu_binding(alias_va));
-        assert_eq!(mem.get_gpu_va(alias_va), Some(alias_gpu_va));
+        assert_eq!(mem.get_gpu_va(alias_va), Some(alias_gpu_va.gpu_va));
 
         // Verify both can be used independently
         let data1 = vec![0x11; size as usize];
         let data2 = vec![0x22; size as usize];
         mem.upload_to_gpu(source_va, 0, &data1).expect("Source upload failed");
+        assert_eq!(mem.readback_from_gpu(alias_va, 0, size).unwrap(), data1);
         mem.upload_to_gpu(alias_va, 0, &data2).expect("Alias upload failed");
 
         // Readback should show different data
         let readback1 = mem.readback_from_gpu(source_va, 0, size).expect("Source readback failed");
         let readback2 = mem.readback_from_gpu(alias_va, 0, size).expect("Alias readback failed");
-        assert_eq!(readback1, data1);
+        assert_eq!(readback1, data2);
         assert_eq!(readback2, data2);
     }
 
@@ -369,15 +365,15 @@ mod native_mem_tests {
         let va1 = 0xE000_0000;
         let size1 = PAGE * 8; // 512 KiB
         mem.allocate(va1, size1, 0x04, false).expect("Alloc 1 failed");
-        let gpu_va1 = mem.create_gpu_resource(va1, size1, true).expect("GPU 1 failed");
+        let gpu_va1 = mem.create_gpu_resource(va1, size1, true).expect("GPU 1 failed").gpu_va;
 
         // Second allocation that overlaps with first (should fail or be handled)
         // In the native backend, each VA is tracked independently
         // Overlapping VAs would be separate allocations with separate GPU resources
         let va2 = va1 + PAGE * 2; // Overlaps with va1
         let size2 = PAGE * 4;
-        mem.allocate(va2, size2, 0x04, false).expect("Alloc 2 failed");
-        let gpu_va2 = mem.create_gpu_resource(va2, size2, true).expect("GPU 2 failed");
+        assert!(mem.allocate(va2, size2, 0x04, false).is_err(), "overlapping fixed-address host allocation must fail");
+        let gpu_va2 = mem.create_gpu_resource(va2, size2, true).expect("GPU 2 failed").gpu_va;
 
         // They should have different GPU VAs (different resources)
         assert_ne!(gpu_va1, gpu_va2);
@@ -407,11 +403,11 @@ mod native_mem_tests {
         let source_va = 0xF000_0000;
         let size = PAGE * 4;
         mem.allocate(source_va, size, 0x04, false).expect("Source alloc failed");
-        let source_gpu_va = mem.create_gpu_resource(source_va, size, true).expect("Source GPU resource failed");
+        let source_gpu_va = mem.create_gpu_resource(source_va, size, true).expect("Source GPU resource failed").gpu_va;
 
         // Create aliased resource at same heap location
         let alias_va = 0xF100_0000;
-        let alias_gpu_va = mem.create_aliased_resource(alias_va, source_va, size, true).expect("Aliased resource failed");
+        let alias_gpu_va = mem.create_aliased_resource(alias_va, source_va, size, true).expect("Aliased resource failed").gpu_va;
 
         // Upload different data through each VA
         let data1 = vec![0xAA; size as usize];
@@ -458,7 +454,13 @@ mod native_mem_tests {
         let alias_gpu_va = mem.create_aliased_texture(alias_va, source_va, &desc, true).expect("Aliased texture failed");
 
         // Both should be valid
-        assert_ne!(source_gpu_va, alias_gpu_va);
+        assert_ne!(source_gpu_va.resource(), alias_gpu_va.resource());
+        let pixels: Vec<u8> = (0..256*256*4).map(|i| (i ^ (i >> 8)) as u8).collect();
+        mem.upload_texture_to_gpu(source_va, 0, &pixels, 1024, 256*1024).unwrap();
+        assert_eq!(mem.readback_texture(alias_va, 0).unwrap(), pixels);
+        let changed: Vec<_> = pixels.iter().map(|b| !b).collect();
+        mem.upload_texture_to_gpu(alias_va, 0, &changed, 1024, 256*1024).unwrap();
+        assert_eq!(mem.readback_texture(source_va, 0).unwrap(), changed);
         assert!(mem.has_gpu_binding(source_va));
         assert!(mem.has_gpu_binding(alias_va));
     }
@@ -481,13 +483,20 @@ mod native_mem_tests {
             Format: DXGI_FORMAT_BC3_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
-            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            Flags: D3D12_RESOURCE_FLAG_NONE,
         };
 
-        let gpu_va = mem.create_gpu_texture(va, &desc, true).expect("Texture creation failed");
-        assert_ne!(gpu_va, 0);
+        let binding = mem.create_gpu_texture(va, &desc, false).expect("Texture creation failed");
+        let actual = unsafe { binding.resource().GetDesc() };
+        assert_eq!((actual.Format, actual.Width, actual.MipLevels), (desc.Format, desc.Width, desc.MipLevels));
         assert!(mem.has_gpu_binding(va));
-        assert_eq!(mem.get_gpu_va(va), Some(gpu_va));
+        assert_eq!(mem.get_gpu_va(va), None);
+        for mip in 0..10 {
+            let blocks = ((1024_u32 >> mip).div_ceil(4)).max(1);
+            let bytes: Vec<u8> = (0..blocks*blocks*16).map(|i| (i ^ (i>>8) ^ mip) as u8).collect();
+            mem.upload_texture_to_gpu(va, mip, &bytes, blocks*16, bytes.len() as u64).unwrap();
+            assert_eq!(mem.readback_texture(va, mip).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -498,23 +507,30 @@ mod native_mem_tests {
         // Test BLAS creation
         let blas_va = 0xF000_0000;
         let blas_size = 64 * 1024; // 64 KiB
+        let geometry = D3D12_RAYTRACING_GEOMETRY_DESC {
+            Type: D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES,
+            Anonymous: D3D12_RAYTRACING_GEOMETRY_DESC_0 { Triangles: D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC {
+                VertexFormat: DXGI_FORMAT_R32G32B32_FLOAT, VertexCount: 3,
+                VertexBuffer: D3D12_GPU_VIRTUAL_ADDRESS_AND_STRIDE { StartAddress: 0, StrideInBytes: 12 }, ..Default::default()
+            } }, ..Default::default()
+        };
         let build_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
+            Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 { pGeometryDescs: &geometry },
             Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
             Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS(0),
             NumDescs: 1,
             DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
-            pGeometryDescs: std::ptr::null(),
             ..Default::default()
         };
         
-        let blas_gpu_va = mem.create_blas(blas_va, blas_size, &build_inputs).expect("BLAS creation failed");
+        let blas_gpu_va = mem.create_blas(blas_va, blas_size, &build_inputs).expect("BLAS creation failed").gpu_va;
         assert_ne!(blas_gpu_va, 0);
         assert!(mem.has_gpu_binding(blas_va));
 
         // Test TLAS creation
         let tlas_va = 0xF100_0000;
         let tlas_size = 64 * 1024;
-        let tlas_gpu_va = mem.create_tlas(tlas_va, tlas_size).expect("TLAS creation failed");
+        let tlas_gpu_va = mem.create_tlas(tlas_va, tlas_size).expect("TLAS creation failed").gpu_va;
         assert_ne!(tlas_gpu_va, 0);
         assert!(mem.has_gpu_binding(tlas_va));
 
@@ -540,7 +556,7 @@ mod benchmarks {
         let start = Instant::now();
         
         for i in 0..ITERATIONS {
-            let va = 0x1000_0000 + i * PAGE * 4;
+            let va = 0x1000_0000 + i as u64 * PAGE * 4;
             mem.allocate(va, PAGE, 0x04, false).expect("Allocation failed");
         }
         
@@ -550,7 +566,7 @@ mod benchmarks {
         
         // Cleanup
         for i in 0..ITERATIONS {
-            let va = 0x1000_0000 + i * PAGE * 4;
+            let va = 0x1000_0000 + i as u64 * PAGE * 4;
             mem.free(va);
         }
     }
@@ -563,14 +579,14 @@ mod benchmarks {
         const ITERATIONS: usize = 1000;
         // Pre-allocate memory
         for i in 0..ITERATIONS {
-            let va = 0x2000_0000 + i * PAGE * 4;
+            let va = 0x2000_0000 + i as u64 * PAGE * 4;
             mem.allocate(va, PAGE, 0x04, false).expect("Allocation failed");
         }
 
         let start = Instant::now();
         
         for i in 0..ITERATIONS {
-            let va = 0x2000_0000 + i * PAGE * 4;
+            let va = 0x2000_0000 + i as u64 * PAGE * 4;
             mem.create_gpu_resource(va, PAGE, true).expect("GPU resource creation failed");
         }
         
@@ -580,7 +596,7 @@ mod benchmarks {
         
         // Cleanup
         for i in 0..ITERATIONS {
-            let va = 0x2000_0000 + i * PAGE * 4;
+            let va = 0x2000_0000 + i as u64 * PAGE * 4;
             mem.free(va);
         }
     }
@@ -650,7 +666,7 @@ mod benchmarks {
         
         // Pre-populate
         for i in 0..1000 {
-            let va = 0x5000_0000 + i * PAGE * 4;
+            let va = 0x5000_0000 + i as u64 * PAGE * 4;
             mem.allocate(va, PAGE, 0x04, false).expect("Pre-populate failed");
             mem.create_gpu_resource(va, PAGE, true).expect("GPU resource failed");
         }
@@ -661,7 +677,7 @@ mod benchmarks {
             std::thread::spawn(move || {
                 for _ in 0..OPS_PER_THREAD {
                     let idx = fastrand::usize(0..1000);
-                    let va = 0x5000_0000 + idx * PAGE * 4;
+                    let va = 0x5000_0000 + idx as u64 * PAGE * 4;
                     let _ = mem.get_allocation(va);
                     let _ = mem.get_gpu_va(va);
                 }
@@ -683,14 +699,15 @@ mod benchmarks {
         let (device, copy_queue) = create_test_device();
         let mem = NativeMemory::new(device, copy_queue).expect("Failed to create native memory");
 
+        let mut allocated = Vec::new();
         const RESOURCE_COUNT: usize = 10000;
         const RESOURCE_SIZE: u64 = 256 * 1024; // 256 KiB
         
         let start = Instant::now();
         
         for i in 0..RESOURCE_COUNT {
-            let va = 0x6000_0000 + i * RESOURCE_SIZE;
-            mem.allocate(va, RESOURCE_SIZE, 0x04, false).expect("Allocation failed");
+            let va = mem.allocate(0, RESOURCE_SIZE, 0x04, false).expect("Allocation failed");
+            allocated.push(va);
             mem.create_gpu_resource(va, RESOURCE_SIZE, true).expect("GPU resource failed");
         }
         
@@ -703,116 +720,13 @@ mod benchmarks {
         mem.next_frame();
         
         // Cleanup
-        for i in 0..RESOURCE_COUNT {
-            let va = 0x6000_0000 + i * RESOURCE_SIZE;
+        for va in allocated {
             mem.free(va);
         }
     }
 }
 
 // Comparative benchmarks: run both backends under identical workloads
-mod comparative_benchmarks {
-    use super::*;
-    use std::time::Instant;
-    use std::sync::Arc;
-
-    #[test]
-    fn benchmark_comparative_allocation_latency() {
-        let (device, copy_queue) = create_test_device();
-        
-        // Test native backend
-        let native_mem = NativeMemory::new(device.clone(), copy_queue.clone()).expect("Failed to create native memory");
-        
-        const ITERATIONS: usize = 10000;
-        
-        // Native allocation
-        let start = Instant::now();
-        for i in 0..ITERATIONS {
-            let va = 0x1000_0000 + i * PAGE * 4;
-            native_mem.allocate(va, PAGE, 0x04, false).expect("Allocation failed");
-        }
-        let native_alloc_time = start.elapsed();
-        
-        // Cleanup native
-        for i in 0..ITERATIONS {
-            let va = 0x1000_0000 + i * PAGE * 4;
-            native_mem.free(va);
-        }
-        
-        // Test legacy backend (using the trait)
-        let legacy_backend = victory_gpu::memory_backend::LegacyBackend::new();
-        
-        let start = Instant::now();
-        for i in 0..ITERATIONS {
-            let va = 0x1000_0000 + i * PAGE * 4;
-            legacy_backend.allocate(va, PAGE, 0x04, false).expect("Allocation failed");
-        }
-        let legacy_alloc_time = start.elapsed();
-        
-        // Cleanup legacy
-        for i in 0..ITERATIONS {
-            let va = 0x1000_0000 + i * PAGE * 4;
-            legacy_backend.free(va);
-        }
-        
-        println!("=== Allocation Latency Comparison ===");
-        println!("Native:  {:?} for {} allocs ({:?}/alloc)", native_alloc_time, ITERATIONS, native_alloc_time / ITERATIONS as u32);
-        println!("Legacy:  {:?} for {} allocs ({:?}/alloc)", legacy_alloc_time, ITERATIONS, legacy_alloc_time / ITERATIONS as u32);
-        println!("Speedup: {:.2}x", legacy_alloc_time.as_secs_f64() / native_alloc_time.as_secs_f64());
-    }
-
-    #[test]
-    fn benchmark_comparative_upload_throughput() {
-        let (device, copy_queue) = create_test_device();
-        
-        const BUFFER_SIZE: u64 = 1024 * 1024; // 1 MiB
-        const ITERATIONS: usize = 50;
-        
-        // Native backend
-        let native_mem = NativeMemory::new(device.clone(), copy_queue.clone()).expect("Failed to create native memory");
-        let va_native = 0x3000_0000;
-        native_mem.allocate(va_native, BUFFER_SIZE, 0x04, false).expect("Allocation failed");
-        native_mem.create_gpu_resource(va_native, BUFFER_SIZE, true).expect("GPU resource creation failed");
-        
-        // Legacy backend
-        let legacy_backend = victory_gpu::memory_backend::LegacyBackend::new();
-        let va_legacy = 0x4000_0000;
-        legacy_backend.allocate(va_legacy, BUFFER_SIZE, 0x04, false).expect("Allocation failed");
-        legacy_backend.create_gpu_resource(va_legacy, BUFFER_SIZE, true).ok(); // May fail
-        
-        let test_data = vec![0xAA; BUFFER_SIZE as usize];
-        
-        // Native upload
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            native_mem.upload_to_gpu(va_native, 0, &test_data).expect("Upload failed");
-        }
-        let native_upload_time = start.elapsed();
-        
-        // Legacy upload (may not be fully implemented)
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            legacy_backend.upload_to_gpu(va_legacy, 0, &test_data).ok();
-        }
-        let legacy_upload_time = start.elapsed();
-        
-        let total_bytes = BUFFER_SIZE * ITERATIONS as u64;
-        let native_throughput = (total_bytes as f64 / 1024.0 / 1024.0) / native_upload_time.as_secs_f64();
-        let legacy_throughput = if legacy_upload_time.as_secs_f64() > 0.0 {
-            (total_bytes as f64 / 1024.0 / 1024.0) / legacy_upload_time.as_secs_f64()
-        } else {
-            0.0
-        };
-        
-        println!("=== Upload Throughput Comparison ===");
-        println!("Native:  {:.2} MB/s ({:?})", native_throughput, native_upload_time);
-        println!("Legacy:  {:.2} MB/s ({:?})", legacy_throughput, legacy_upload_time);
-        if legacy_throughput > 0.0 {
-            println!("Speedup: {:.2}x", native_throughput / legacy_throughput);
-        }
-    }
-}
-
 // Tests that work without native-memory feature (validation of assumptions)
 #[cfg(test)]
 mod assumption_validation_tests {
@@ -845,7 +759,8 @@ mod assumption_validation_tests {
 
         // With COPIES=4095, each copy is a separate Shadow (D3D12 resource)
         // Each shadow is at least 64 KiB (one page)
-        const MIN_SHADOW_SIZE: u64 = 65536;
+        const MIN_SHADOW_SIZE: u64 = PAGE;
+        const COPIES: u32 = (1 << 12) - 1;
         const MAX_SHADOW_MEMORY: u64 = COPIES as u64 * MIN_SHADOW_SIZE;
 
         // Max shadow memory = 4095 * 64 KiB = ~256 MiB minimum
@@ -897,7 +812,7 @@ mod assumption_validation_tests {
         // Simulate typical title allocation pattern
         let mut map = HashMap::new();
         for i in 0..10_000 {
-            let va = 0x1000_0000 + i * 65536 * 4; // 256 KiB each
+            let va = 0x1000_0000u64 + i * 65536 * 4; // 256 KiB each
             map.insert(va, vec![0u8; 256 * 1024]);
             sparse_entries += 1;
         }

@@ -154,7 +154,7 @@ unsafe impl Sync for NativeBackend {}
 
 impl NativeBackend {
     pub fn new(device: Arc<ID3D12Device>, copy_queue: Arc<ID3D12CommandQueue>) -> Result<Self> {
-        let inner = Arc::new(crate::native_mem::NativeMemory::new(device, copy_queue)?);
+        let inner = crate::native_mem::init_native_memory(device, copy_queue)?;
         Ok(NativeBackend { inner })
     }
 
@@ -272,7 +272,7 @@ static MEMORY_BACKEND: OnceLock<Box<dyn MemoryBackend>> = OnceLock::new();
 #[cfg(windows)]
 pub fn init_memory_backend(device: Arc<ID3D12Device>, copy_queue: Arc<ID3D12CommandQueue>) -> Result<&'static dyn MemoryBackend> {
     let backend = Box::new(NativeBackend::new(device, copy_queue)?);
-    MEMORY_BACKEND.set(Box::new(backend)).map_err(|_| anyhow::anyhow!("Backend already initialized"))?;
+    MEMORY_BACKEND.set(backend).map_err(|_| anyhow::anyhow!("Backend already initialized"))?;
     Ok(MEMORY_BACKEND.get().unwrap().as_ref())
 }
 
@@ -292,5 +292,5 @@ pub fn memory_backend() -> Option<&'static dyn MemoryBackend> {
 /// Check if native backend is active (always true now).
 #[cfg(windows)]
 pub fn is_native_backend_active() -> bool {
-    true
+    MEMORY_BACKEND.get().is_some()
 }

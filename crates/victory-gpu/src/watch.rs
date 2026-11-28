@@ -232,7 +232,7 @@ pub(crate) fn track(start: usize, len: usize, views: bool) -> Option<Tracked> {
 const JOURNAL_REGION_PAGES: usize = (2 << 20) / PAGE;
 
 struct PageNotes {
-    /// Page number â†’ the asking that last found it written.
+    /// Page number Ã¢â€ â€™ the asking that last found it written.
     written: BTreeMap<usize, u64>,
     /// Upper bound on write generations for each 2 MiB span with journal entries.
     latest: BTreeMap<usize, u64>,
@@ -4724,7 +4724,7 @@ mod many_askers_tests {
         super::title_memory_allocated(at, PAGE);
         assert!(!super::published(at, end));
         let (_, all) = ask(fifth);
-        assert_eq!(all, []);
+        assert!(all.is_empty());
         // A reservation of the ordinary kind is no placeholder.
         let plain = unsafe { VirtualAlloc(std::ptr::null(), PAGE, MEM_RESERVE, PAGE_NOACCESS) } as usize;
         assert!(!super::placeholder(plain / PAGE));

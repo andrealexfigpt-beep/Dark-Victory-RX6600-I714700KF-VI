@@ -43,7 +43,7 @@ mod framegen;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]
-mod host;
+pub mod host;
 #[cfg(windows)]
 mod launch;
 #[cfg(windows)]
@@ -146,3 +146,6 @@ pub use native_mem::{
 pub mod memory_backend;
 #[cfg(windows)]
 pub use memory_backend::{MemoryBackend, init_memory_backend, init_memory_backend_auto, memory_backend, is_native_backend_active};
+
+#[cfg(all(test, windows))]
+mod native_comparison_tests;

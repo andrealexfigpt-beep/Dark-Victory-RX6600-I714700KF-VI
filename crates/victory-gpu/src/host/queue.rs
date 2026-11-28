@@ -48,7 +48,7 @@ pub(crate) struct QueueManager {
     /// Shared timeline semaphore for cross-queue sync (if supported).
     timeline_semaphore: Option<ID3D12Fence>,
     /// Statistics.
-    stats: QueueStats,
+    stats: Mutex<QueueStats>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -131,7 +131,7 @@ impl QueueManager {
                 pending_ops: Mutex::new(VecDeque::new()),
             }),
             timeline_semaphore,
-            stats: QueueStats::default(),
+            stats: Mutex::default(),
         })
     }
 
@@ -199,9 +199,9 @@ impl QueueManager {
 
         // Update stats.
         match queue_type {
-            QueueType::Graphics => self.stats.graphics_submissions += 1,
-            QueueType::Compute => self.stats.compute_submissions += 1,
-            QueueType::Copy => self.stats.copy_submissions += 1,
+            QueueType::Graphics => self.stats.lock().unwrap().graphics_submissions += 1,
+            QueueType::Compute => self.stats.lock().unwrap().compute_submissions += 1,
+            QueueType::Copy => self.stats.lock().unwrap().copy_submissions += 1,
         }
 
         Ok(fence_value)
@@ -219,7 +219,7 @@ impl QueueManager {
         unsafe { queue.fence.SetEventOnCompletion(fence_value, event)? };
         unsafe { WaitForSingleObject(event, INFINITE) };
 
-        self.stats.fence_waits += 1;
+        self.stats.lock().unwrap().fence_waits += 1;
         Ok(())
     }
 
@@ -244,7 +244,7 @@ impl QueueManager {
             unsafe { WaitForSingleObject(event, INFINITE) };
         }
 
-        self.stats.cross_queue_syncs += 1;
+        self.stats.lock().unwrap().cross_queue_syncs += 1;
         Ok(fence_value)
     }
 
@@ -265,7 +265,7 @@ impl QueueManager {
 
     /// Get statistics.
     pub(crate) fn stats(&self) -> QueueStats {
-        self.stats
+        *self.stats.lock().unwrap()
     }
 }
 
@@ -311,7 +311,7 @@ impl AsyncQueue {
 static QUEUE_MANAGER: OnceLock<QueueManager> = OnceLock::new();
 
 /// Initialize the queue manager.
-pub(crate) fn init_queue_manager(device: &ID3D12Device) -> windows::core::Result<()> {
+pub fn init_queue_manager(device: &ID3D12Device) -> windows::core::Result<()> {
     let manager = QueueManager::new(device)?;
     QUEUE_MANAGER.set(manager).map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
 }

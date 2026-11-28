@@ -5532,15 +5532,15 @@ mod tests {
         let (queued, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
         assert_eq!(queued, 1);
         heap.texture_slot_done(1, write, None);
-        assert_eq!(slots(u64::MAX), []);
+        assert!(slots(u64::MAX).is_empty());
         // Uploaded and out of the queue. Memory elsewhere: nothing.
         assert_eq!(heap.slots_written_under(&[(at + 0x10_0000, at + 0x10_1000)], 60, true), [0, 0, 0]);
         // Under it, counted only: it stays out of the queue.
         assert_eq!(heap.slots_written_under(&written, 60, false), [1, 1, 0]);
-        assert_eq!(slots(u64::MAX), []);
+        assert!(slots(u64::MAX).is_empty());
         // Under it, asked for: due two frames on, not before.
         assert_eq!(heap.slots_written_under(&written, 60, true), [1, 1, 1]);
-        assert_eq!(slots(61), []);
+        assert!(slots(61).is_empty());
         assert_eq!(slots(62), [1]);
     }
 
@@ -5612,12 +5612,12 @@ mod tests {
         let (queued, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
         assert_eq!(queued, 1);
         heap.texture_slot_done(1, write, None);
-        assert_eq!(slots(u64::MAX), []);
+        assert!(slots(u64::MAX).is_empty());
         // Memory elsewhere: nothing. Under the texture: due from the next frame.
         remapped((at + 2 * len) as usize, 0x1000);
         remapped(at as usize, 0x1000);
         assert_eq!(heap.texture_slots_remapped(50), 1);
-        assert_eq!(slots(50), []);
+        assert!(slots(50).is_empty());
         assert_eq!(slots(51), [1]);
         // A wider texture written at the same address: slot 1 is stale.
         assert_eq!(heap.note_buffer(2, Some(&view(at, 128)), false), [(1, 0)]);
@@ -5674,7 +5674,7 @@ mod tests {
         heap.tabled_in(2, false, frame + 1);
         assert_eq!(slots(frame + 1), [2]);
         heap.queue_texture(2, true, false, frame + 2);
-        assert_eq!(slots(frame + 2), []);
+        assert!(slots(frame + 2).is_empty());
         // Long after the last table, a write is due at once.
         heap.queue_texture(2, true, false, frame + 3 + TABLED_FRAMES);
         assert_eq!(slots(frame + 3 + TABLED_FRAMES), [2]);

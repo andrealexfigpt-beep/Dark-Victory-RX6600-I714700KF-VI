@@ -56,19 +56,19 @@ const DEFAULT_ALIGNMENT: u64 = 64 * 1024;
 
 /// A host allocation backing title virtual memory.
 #[derive(Debug)]
-struct HostAllocation {
+pub struct HostAllocation {
     /// Base address in title virtual address space.
     title_va: u64,
     /// Size in bytes.
-    size: u64,
+    pub size: u64,
     /// Protection flags (PAGE_READWRITE, etc.).
     protect: u32,
     /// Whether this is a placeholder (reserved but not committed).
-    placeholder: bool,
+    pub placeholder: bool,
     /// Underlying Windows allocation (for VirtualFree on drop).
     base_ptr: *mut std::ffi::c_void,
     /// Actual committed size.
-    committed_size: u64,
+    pub committed_size: u64,
 }
 
 impl Drop for HostAllocation {
@@ -76,7 +76,7 @@ impl Drop for HostAllocation {
         if !self.base_ptr.is_null() {
             // SAFETY: We allocated this with VirtualAlloc.
             unsafe {
-                VirtualFree(self.base_ptr, 0, MEM_RELEASE);
+                if let Err(error) = VirtualFree(self.base_ptr, 0, MEM_RELEASE) { warn!(%error, "native memory cleanup failed"); }
             }
         }
     }
@@ -87,7 +87,7 @@ impl Drop for NativeMemory {
         // Close event handles
         if !self.copy_fence_event.is_invalid() {
             unsafe {
-                CloseHandle(self.copy_fence_event);
+                if let Err(error) = CloseHandle(self.copy_fence_event) { warn!(%error, "native memory cleanup failed"); }
             }
         }
         // UploadRing and ReadbackRing events are dropped with their structs
@@ -95,8 +95,8 @@ impl Drop for NativeMemory {
 }
 
 /// A GPU resource bound to a title virtual address range.
-#[derive(Debug, Clone)]
-struct GpuResourceBinding {
+#[derive(Debug)]
+pub struct GpuResourceBinding {
     /// Title virtual address this resource is bound to.
     title_va: u64,
     /// Size in bytes.
@@ -130,8 +130,9 @@ struct GpuResourceBinding {
     /// Optional readback heap staging resource for GPU->CPU copies.
     readback_staging: Option<ID3D12Resource>,
     /// Fence value for tracking GPU completion on this resource.
-    fence_value: u64,
+    fence_value: AtomicU64,
     /// Aliased resources sharing the same heap memory (for XMemPhysicalPages aliasing).
+    active_alias: Arc<Mutex<Option<ID3D12Resource>>>,
     aliased_resources: Arc<Mutex<Vec<ID3D12Resource>>>,
     /// Heap offset for placed resources (for aliasing).
     heap_offset: u64,
@@ -166,7 +167,8 @@ impl GpuResourceBinding {
             depth_or_array_size: 1,
             upload_staging: None,
             readback_staging: None,
-            fence_value: 0,
+            fence_value: AtomicU64::new(0),
+            active_alias: Arc::default(),
             aliased_resources: Arc::new(Mutex::new(Vec::new())),
             heap_offset: 0,
             heap: None,
@@ -202,7 +204,8 @@ impl GpuResourceBinding {
             depth_or_array_size: desc.DepthOrArraySize,
             upload_staging: None,
             readback_staging: None,
-            fence_value: 0,
+            fence_value: AtomicU64::new(0),
+            active_alias: Arc::default(),
             aliased_resources: Arc::new(Mutex::new(Vec::new())),
             heap_offset,
             heap,
@@ -210,6 +213,23 @@ impl GpuResourceBinding {
     }
 
     /// Add an aliased resource (for XMemPhysicalPages aliasing).
+    fn activate(&self, list: &ID3D12GraphicsCommandList) {
+        use std::mem::ManuallyDrop;
+        let mut active = self.active_alias.lock().unwrap();
+        if active.as_ref() == Some(&self.resource) { return; }
+        let mut barrier = D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_ALIASING, Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 { Aliasing: ManuallyDrop::new(D3D12_RESOURCE_ALIASING_BARRIER {
+                pResourceBefore: ManuallyDrop::new(active.take()), pResourceAfter: ManuallyDrop::new(Some(self.resource.clone()))
+            }) }
+        };
+        unsafe {
+            list.ResourceBarrier(std::slice::from_ref(&barrier));
+            ManuallyDrop::drop(&mut (*barrier.Anonymous.Aliasing).pResourceBefore);
+            ManuallyDrop::drop(&mut (*barrier.Anonymous.Aliasing).pResourceAfter);
+        }
+        *active = Some(self.resource.clone());
+    }
     fn add_alias(&self, resource: ID3D12Resource) {
         self.aliased_resources.lock().unwrap().push(resource);
     }
@@ -220,6 +240,8 @@ impl GpuResourceBinding {
     }
 
     /// Check if this is a texture resource.
+    pub fn resource(&self) -> &ID3D12Resource { &self.resource }
+
     fn is_texture(&self) -> bool {
         matches!(
             self.dimension,
@@ -260,7 +282,7 @@ impl GpuResourceBinding {
             );
         }
         
-        (footprint, rows, footprint.Footprint.RowPitch, total_bytes)
+        (footprint, rows, row_pitch as u32, total_bytes)
     }
 
     /// Get the full footprint for a subresource (for CopyTextureRegion).
@@ -411,7 +433,7 @@ impl GpuArena {
 /// Persistent ring buffer for uploads (CPU -> GPU).
 /// Uses fence-safe wraparound to prevent reuse of in-flight memory.
 #[derive(Debug)]
-struct UploadRing {
+pub struct UploadRing {
     /// The upload heap resource.
     resource: ID3D12Resource,
     /// Mapped CPU pointer.
@@ -584,7 +606,7 @@ impl Drop for UploadRing {
     fn drop(&mut self) {
         if !self.fence_event.is_invalid() {
             unsafe {
-                CloseHandle(self.fence_event);
+                if let Err(error) = CloseHandle(self.fence_event) { warn!(%error, "native memory cleanup failed"); }
             }
         }
         // Resource and fence are reference-counted, will be dropped automatically
@@ -594,7 +616,7 @@ impl Drop for UploadRing {
 /// Persistent ring buffer for readbacks (GPU -> CPU).
 /// Uses fence-safe wraparound to prevent reuse of in-flight memory.
 #[derive(Debug)]
-struct ReadbackRing {
+pub struct ReadbackRing {
     resource: ID3D12Resource,
     mapped_ptr: *mut u8,
     size: u64,
@@ -744,7 +766,7 @@ impl Drop for ReadbackRing {
     fn drop(&mut self) {
         if !self.fence_event.is_invalid() {
             unsafe {
-                CloseHandle(self.fence_event);
+                if let Err(error) = CloseHandle(self.fence_event) { warn!(%error, "native memory cleanup failed"); }
             }
         }
     }
@@ -820,12 +842,15 @@ struct NativeMemoryStats {
 impl NativeMemory {
     /// Create a new native memory manager.
     pub fn new(device: Arc<ID3D12Device>, copy_queue: Arc<ID3D12CommandQueue>) -> anyhow::Result<Self> {
+        let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory4 = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2(Default::default())? };
+        let adapter = unsafe { factory.EnumAdapterByLuid(device.GetAdapterLuid())? };
+        crate::host::memory_mgr::init_memory_manager(&device, Some(adapter));
         // Create default arenas
         let default_arena = GpuArena::new(
             &device,
             GPU_ARENA_SIZE,
             D3D12_HEAP_TYPE_DEFAULT,
-            D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
+            D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_SHARED,
         )?;
 
         let upload_arena = GpuArena::new(
@@ -884,9 +909,12 @@ impl NativeMemory {
     /// Allocate title virtual memory (replaces XMemVirtualAlloc).
     /// Returns the base title VA.
     pub fn allocate(&self, title_va: u64, size: u64, protect: u32, placeholder: bool) -> anyhow::Result<u64> {
-        // Align to page boundary
-        let size = size.next_multiple_of(PAGE);
+        anyhow::ensure!(size != 0, "empty allocation");
         let aligned_va = title_va & !(PAGE - 1);
+        let size = size.checked_add(title_va - aligned_va)
+            .and_then(|n| n.checked_next_multiple_of(PAGE))
+            .ok_or_else(|| anyhow::anyhow!("allocation size overflow"))?;
+        anyhow::ensure!(aligned_va.checked_add(size).is_some(), "allocation address overflow");
 
         if placeholder {
             // Reserve address space without committing
@@ -903,18 +931,19 @@ impl NativeMemory {
                 return Err(anyhow::anyhow!("VirtualAlloc reserve failed"));
             }
 
+            let allocated_va = ptr as u64;
             let alloc = Arc::new(HostAllocation {
-                title_va: aligned_va,
+                title_va: allocated_va,
                 size,
                 protect,
                 placeholder: true,
                 base_ptr: ptr,
                 committed_size: 0,
             });
-            self.allocations.insert(aligned_va, alloc);
+            self.allocations.insert(allocated_va, alloc);
             self.stats.host_allocations.fetch_add(1, Ordering::Relaxed);
             debug!("Reserved title VA {:#x} + {:#x} (placeholder)", aligned_va, size);
-            Ok(aligned_va)
+            Ok(allocated_va)
         } else {
             // Commit memory
             let ptr = unsafe {
@@ -930,18 +959,19 @@ impl NativeMemory {
                 return Err(anyhow::anyhow!("VirtualAlloc commit failed"));
             }
 
+            let allocated_va = ptr as u64;
             let alloc = Arc::new(HostAllocation {
-                title_va: aligned_va,
+                title_va: allocated_va,
                 size,
                 protect,
                 placeholder: false,
                 base_ptr: ptr,
                 committed_size: size,
             });
-            self.allocations.insert(aligned_va, alloc);
+            self.allocations.insert(allocated_va, alloc);
             self.stats.host_allocations.fetch_add(1, Ordering::Relaxed);
             debug!("Allocated title VA {:#x} + {:#x}", aligned_va, size);
-            Ok(aligned_va)
+            Ok(allocated_va)
         }
     }
 
@@ -952,7 +982,7 @@ impl NativeMemory {
     pub fn free(&self, title_va: u64) -> bool {
         // Remove GPU binding and get the resource for deferred destruction
         let resource_info = self.gpu_bindings.remove(&title_va).map(|(_, binding)| {
-            let fence_value = binding.fence_value;
+            let fence_value = binding.fence_value.load(Ordering::Acquire);
             let resource = binding.resource.clone();
             let heap = binding.heap.clone();
             let heap_offset = binding.heap_offset;
@@ -991,12 +1021,13 @@ impl NativeMemory {
         // Try to allocate from default arena
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, uav)?;
 
-        let binding = Arc::new(GpuResourceBinding::new_buffer(
+        let mut binding = GpuResourceBinding::new_buffer(
             self.device.clone(), title_va, size, resource.clone(), gpu_va, uav
-        ));
+        );
         // Store heap info for potential aliasing
         binding.heap_offset = offset;
         binding.heap = heap;
+        let binding = Arc::new(binding);
 
         // Track with memory manager (Phase 6 Hardware Optimization).
         crate::host::memory_mgr::track_gpu_resource(&resource, size, true, crate::host::memory_mgr::MemoryPoolType::Static, crate::host::memory_mgr::ResourcePriority::Normal);
@@ -1055,7 +1086,7 @@ impl NativeMemory {
             &self.device,
             GPU_ARENA_SIZE,
             D3D12_HEAP_TYPE_DEFAULT,
-            D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
+            D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_SHARED,
         )?;
 
         let offset = new_arena.allocate(size, alignment).expect("New arena should have space");
@@ -1093,7 +1124,7 @@ impl NativeMemory {
             return Err(anyhow::anyhow!("No GPU resource bound to title VA {:#x}", title_va));
         };
 
-        if offset + len > binding.size {
+        if offset.checked_add(len).is_none_or(|end| end > binding.size) {
             return Err(anyhow::anyhow!("GPU write exceeds resource bounds"));
         }
 
@@ -1113,7 +1144,7 @@ impl NativeMemory {
         };
 
         let size = data.len() as u64;
-        if offset + size > binding.size {
+        if offset.checked_add(size).is_none_or(|end| end > binding.size) {
             return Err(anyhow::anyhow!("Upload exceeds resource bounds"));
         }
 
@@ -1127,10 +1158,10 @@ impl NativeMemory {
             let fence_value = ring.completed_fence();
             // Wait for the fence to make progress
             let pending = ring.pending.lock().unwrap();
-            if let Some((_, _, oldest_fence)) = pending.first() {
-                if *oldest_fence > 0 {
+            if let Some(&(_, _, oldest_fence)) = pending.first() {
+                if oldest_fence > 0 {
                     drop(pending);
-                    ring.wait_fence(*oldest_fence);
+                    ring.wait_fence(oldest_fence);
                     continue;
                 }
             }
@@ -1146,8 +1177,13 @@ impl NativeMemory {
 
         // Record copy command on copy command list
         let copy_list = self.copy_list.lock().unwrap();
-        let copy_queue = &self.copy_queue;
+        let allocator = self.copy_allocator.lock().unwrap();
         unsafe {
+            allocator.Reset()?;
+            copy_list.Reset(&*allocator, None)?;
+        }
+        unsafe {
+            binding.activate(&copy_list);
             copy_list.CopyBufferRegion(
                 &binding.resource,
                 offset,
@@ -1159,8 +1195,8 @@ impl NativeMemory {
         unsafe { copy_list.Close()? };
 
         // Execute and signal fence
-        let fence_value = self.execute_copy_list()?;
-        binding.fence_value = fence_value;
+        let fence_value = self.execute_copy_list(&copy_list)?;
+        binding.fence_value.fetch_max(fence_value, Ordering::Release);
 
         self.stats.upload_bytes.fetch_add(size, Ordering::Relaxed);
         self.stats.copy_operations.fetch_add(1, Ordering::Relaxed);
@@ -1170,149 +1206,73 @@ impl NativeMemory {
 
     /// Upload texture data from CPU to GPU texture resource.
     /// Uses texture footprints for proper mip-level and compressed format handling.
-    pub fn upload_texture_to_gpu(
-        &self,
-        title_va: u64,
-        subresource: u32,
-        data: &[u8],
-        row_pitch: u32,
-        slice_pitch: u64,
-    ) -> anyhow::Result<()> {
-        let Some(binding) = self.gpu_bindings.get(&title_va) else {
-            return Err(anyhow::anyhow!("No GPU resource bound to title VA {:#x}", title_va));
-        };
-
-        if !binding.is_texture() {
-            return Err(anyhow::anyhow!("Resource at {:#x} is not a texture", title_va));
-        }
-
-        // Calculate expected size for this subresource
-        let (footprint, rows, footprint_row_pitch, total_bytes) = binding.texture_footprint(&self.device, subresource);
-        
-        if data.len() as u64 != total_bytes {
-            return Err(anyhow::anyhow!(
-                "Texture data size mismatch: expected {} bytes for subresource {}, got {}",
-                total_bytes, subresource, data.len()
-            ));
-        }
-
-        // Allocate from upload ring, waiting if necessary
-        let ring = self.upload_ring();
-        let (ring_offset, ring_ptr) = loop {
-            if let Some(alloc) = ring.allocate(total_bytes, UPLOAD_ALIGNMENT) {
-                break alloc;
-            }
-            let pending = ring.pending.lock().unwrap();
-            if let Some((_, _, oldest_fence)) = pending.first() {
-                if *oldest_fence > 0 {
-                    drop(pending);
-                    ring.wait_fence(*oldest_fence);
-                    continue;
-                }
-            }
-            drop(pending);
-            std::thread::yield_now();
-        };
-
-        // Copy data to ring buffer with proper row/slice pitch handling
-        unsafe {
-            let src_ptr = data.as_ptr();
-            let dst_ptr = ring_ptr;
-            
-            // For each slice (array layer)
-            let array_size = binding.array_size as u32;
-            let slices = if binding.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
-                1 // 3D textures use depth, not array
-            } else {
-                array_size.max(1)
-            };
-            
-            let slice_pitch_actual = if slice_pitch > 0 { slice_pitch } else { total_bytes / slices as u64 };
-            let row_pitch_actual = if row_pitch > 0 { row_pitch as u64 } else { footprint_row_pitch as u64 };
-            
-            for slice in 0..slices {
-                let slice_src = src_ptr.add((slice as u64 * slice_pitch_actual) as usize);
-                let slice_dst = dst_ptr.add((slice as u64 * slice_pitch_actual) as usize);
-                
-                for row in 0..rows {
-                    let row_src = slice_src.add((row as u64 * row_pitch_actual) as usize);
-                    let row_dst = slice_dst.add((row as u64 * row_pitch_actual) as usize);
-                    std::ptr::copy_nonoverlapping(row_src, row_dst, row_pitch_actual as usize);
-                }
-            }
-        }
-
-        // Record texture copy command using CopyTextureRegion on copy command list
-        self.record_texture_copy(
-            &binding.resource,
-            subresource,
-            &ring.resource,
-            ring_offset,
-            &footprint,
-            rows,
-        )?;
-
-        // Execute copy command list and signal fence
-        let fence_value = self.execute_copy_list()?;
-        binding.fence_value = fence_value;
-
-        self.stats.upload_bytes.fetch_add(total_bytes, Ordering::Relaxed);
-        self.stats.copy_operations.fetch_add(1, Ordering::Relaxed);
-
+    pub fn upload_texture_to_gpu(&self, va: u64, sub: u32, data: &[u8], row_pitch: u32, slice_pitch: u64) -> anyhow::Result<()> {
+        self.texture_transfer(va, sub, Some((data, row_pitch, slice_pitch)))?;
         Ok(())
     }
 
-    /// Record a texture copy command to the copy command list.
-    fn record_texture_copy(
-        &self,
-        dst_resource: &ID3D12Resource,
-        dst_subresource: u32,
-        src_resource: &ID3D12Resource,
-        src_offset: u64,
-        footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
-        rows: u32,
-    ) -> anyhow::Result<()> {
-        let mut list = self.copy_list.lock().unwrap();
-        let mut allocator = self.copy_allocator.lock().unwrap();
-        
-        // Reset allocator and list
-        unsafe { allocator.Reset()? };
-        unsafe { list.Reset(&*allocator, None)? };
+    pub fn readback_texture(&self, va: u64, sub: u32) -> anyhow::Result<Vec<u8>> {
+        self.texture_transfer(va, sub, None)
+    }
 
-        // Source: placed footprint on upload ring buffer
-        let from = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: unsafe { std::mem::transmute_copy(src_resource) },
-            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                    Offset: src_offset + footprint.Offset,
-                    Footprint: footprint.Footprint,
-                },
-            },
-        };
-
-        // Destination: subresource on texture resource
-        let to = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: unsafe { std::mem::transmute_copy(dst_resource) },
-            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: dst_subresource,
-            },
-        };
-
-        // Copy texture region
-        unsafe { list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
-
-        // Close the command list
-        unsafe { list.Close()? };
-
-        Ok(())
+    fn texture_transfer(&self, va: u64, sub: u32, upload: Option<(&[u8], u32, u64)>) -> anyhow::Result<Vec<u8>> {
+        use std::mem::ManuallyDrop;
+        let binding = self.gpu_bindings.get(&va).ok_or_else(|| anyhow::anyhow!("missing texture binding"))?;
+        let layers = if binding.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D { 1 } else { binding.array_size };
+        anyhow::ensure!(binding.is_texture() && sub < u32::from(binding.mip_levels) * u32::from(layers), "invalid texture subresource");
+        let (fp, rows, row_bytes, total) = binding.texture_footprint(&self.device, sub);
+        let height = rows as usize;
+        let depth = fp.Footprint.Depth as usize;
+        let width = row_bytes as usize;
+        let pitch = fp.Footprint.RowPitch as usize;
+        anyhow::ensure!(width > 0 && height > 0 && depth > 0 && total != u64::MAX, "invalid footprint");
+        let desc = D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Width: total, Height: 1, DepthOrArraySize: 1, MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, ..Default::default() };
+        let (heap, state) = if upload.is_some() { (D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ) } else { (D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST) };
+        let props = D3D12_HEAP_PROPERTIES { Type: heap, CreationNodeMask: 1, VisibleNodeMask: 1, ..Default::default() };
+        let mut staging = None;
+        unsafe { self.device.CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, state, None, &mut staging)? };
+        let staging: ID3D12Resource = staging.unwrap();
+        if let Some((data, row, slice)) = upload {
+            let row = if row == 0 { width } else { row as usize };
+            let slice = if slice == 0 { row.checked_mul(height) } else { usize::try_from(slice).ok() }.ok_or_else(|| anyhow::anyhow!("slice stride overflow"))?;
+            let last = (depth-1).checked_mul(slice).and_then(|v| v.checked_add((height-1).checked_mul(row)?)).and_then(|v|v.checked_add(width));
+            anyhow::ensure!(row >= width && last.is_some_and(|n| n <= data.len()), "invalid source pitches");
+            let mut ptr = std::ptr::null_mut();
+            unsafe { staging.Map(0, Some(&D3D12_RANGE::default()), Some(&mut ptr))?; }
+            for z in 0..depth { for y in 0..height {
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(z*slice+y*row), ptr.cast::<u8>().add((z*height+y)*pitch), width); }
+            }}
+            unsafe { staging.Unmap(0, None); }
+        }
+        let list = self.copy_list.lock().unwrap();
+        let allocator = self.copy_allocator.lock().unwrap();
+        unsafe { allocator.Reset()?; list.Reset(&*allocator, None)?; }
+        binding.activate(&list);
+        let mut tex = D3D12_TEXTURE_COPY_LOCATION { pResource: ManuallyDrop::new(Some(binding.resource.clone())), Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: sub } };
+        let mut buf = D3D12_TEXTURE_COPY_LOCATION { pResource: ManuallyDrop::new(Some(staging.clone())), Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: fp } };
+        unsafe {
+            if upload.is_some() { list.CopyTextureRegion(&tex,0,0,0,&buf,None); } else { list.CopyTextureRegion(&buf,0,0,0,&tex,None); }
+            ManuallyDrop::drop(&mut tex.pResource); ManuallyDrop::drop(&mut buf.pResource);
+            list.Close()?;
+        }
+        let fence = self.execute_copy_list(&list)?;
+        binding.fence_value.fetch_max(fence, Ordering::Release);
+        let mut result = Vec::new();
+        if upload.is_none() {
+            let mut ptr = std::ptr::null_mut();
+            unsafe { staging.Map(0,None,Some(&mut ptr))?; }
+            for i in 0..height*depth {
+                result.extend_from_slice(unsafe { std::slice::from_raw_parts(ptr.cast::<u8>().add(i*pitch), width) });
+            }
+            unsafe { staging.Unmap(0,Some(&D3D12_RANGE::default())); }
+        }
+        Ok(result)
     }
 
     /// Execute the copy command list and signal fence.
     /// Returns the fence value.
-    fn execute_copy_list(&self) -> anyhow::Result<u64> {
-        let list = self.copy_list.lock().unwrap();
+    fn execute_copy_list(&self, list: &ID3D12GraphicsCommandList) -> anyhow::Result<u64> {
         let copy_queue = &self.copy_queue;
         
         unsafe {
@@ -1325,7 +1285,8 @@ impl NativeMemory {
         // Wait for completion (synchronous for correctness)
         unsafe {
             self.copy_fence.SetEventOnCompletion(fence_value, self.copy_fence_event)?;
-            WaitForSingleObject(self.copy_fence_event, u32::MAX);
+            anyhow::ensure!(WaitForSingleObject(self.copy_fence_event, INFINITE) == WAIT_OBJECT_0, "copy fence wait failed");
+            anyhow::ensure!(self.copy_fence.GetCompletedValue() != u64::MAX, "device removed during copy");
         }
 
         Ok(fence_value)
@@ -1382,84 +1343,17 @@ impl NativeMemory {
             ));
         }
 
-        // Calculate total upload size
-        let mut total_upload_size = 0u64;
-        for i in 0..subresource_count {
-            let (_, _, _, sub_size) = binding.texture_footprint(&self.device, i);
-            total_upload_size += sub_size;
+        let mut offset = 0;
+        for (sub, input) in subresource_data.iter().enumerate() {
+            let (fp, rows, width, _) = binding.texture_footprint(&self.device, sub as u32);
+            let row = u32::try_from(input.RowPitch)?;
+            let slice = u64::try_from(input.SlicePitch)?;
+            anyhow::ensure!(row >= width && slice >= u64::from(rows - 1) * u64::from(row) + u64::from(width), "invalid texture strides");
+            let size = usize::try_from(slice.checked_mul(u64::from(fp.Footprint.Depth)).ok_or_else(|| anyhow::anyhow!("texture size overflow"))?)?;
+            let end = size.checked_add(offset).ok_or_else(|| anyhow::anyhow!("texture offset overflow"))?;
+            self.upload_texture_to_gpu(title_va, sub as u32, data.get(offset..end).ok_or_else(|| anyhow::anyhow!("truncated texture"))?, row, slice)?;
+            offset = end;
         }
-        total_upload_size = total_upload_size.next_multiple_of(UPLOAD_ALIGNMENT);
-
-        // Allocate from upload ring, waiting if necessary
-        let ring = self.upload_ring();
-        let (ring_offset, ring_ptr) = loop {
-            if let Some(alloc) = ring.allocate(total_upload_size, UPLOAD_ALIGNMENT) {
-                break alloc;
-            }
-            let pending = ring.pending.lock().unwrap();
-            if let Some((_, _, oldest_fence)) = pending.first() {
-                if *oldest_fence > 0 {
-                    drop(pending);
-                    ring.wait_fence(*oldest_fence);
-                    continue;
-                }
-            }
-            drop(pending);
-            std::thread::yield_now();
-        };
-
-        // Upload each subresource
-        let mut current_ring_offset = ring_offset;
-        for i in 0..subresource_count {
-            let (footprint, rows, footprint_row_pitch, total_bytes) = binding.texture_footprint(&self.device, i);
-            let sub_data = &subresource_data[i as usize];
-            
-            let src_ptr = sub_data.pData as *const u8;
-            let src_row_pitch = if sub_data.RowPitch > 0 { sub_data.RowPitch as u64 } else { footprint_row_pitch as u64 };
-            let src_slice_pitch = if sub_data.SlicePitch > 0 { sub_data.SlicePitch as u64 } else { total_bytes };
-            
-            let dst_ptr = unsafe { ring_ptr.add(current_ring_offset as usize) };
-            
-            // Copy with proper pitch handling
-            let slices = if binding.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
-                binding.array_size.max(1) as u32
-            } else {
-                binding.array_size.max(1) as u32
-            };
-            
-            for slice in 0..slices {
-                let slice_src = unsafe { src_ptr.add((slice as u64 * src_slice_pitch) as usize) };
-                let slice_dst = unsafe { dst_ptr.add((slice as u64 * src_slice_pitch) as usize) };
-                
-                for row in 0..rows {
-                    let row_src = unsafe { slice_src.add((row as u64 * src_row_pitch) as usize) };
-                    let row_dst = unsafe { slice_dst.add((row as u64 * src_row_pitch) as usize) };
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(row_src, row_dst, src_row_pitch as usize);
-                    }
-                }
-            }
-
-            // Record texture copy command for this subresource
-            self.record_texture_copy(
-                &binding.resource,
-                i,
-                &ring.resource,
-                current_ring_offset,
-                &footprint,
-                rows,
-            )?;
-
-            current_ring_offset += total_bytes.next_multiple_of(UPLOAD_ALIGNMENT);
-        }
-
-        // Execute all recorded copy commands and signal fence
-        let fence_value = self.execute_copy_list()?;
-        binding.fence_value = fence_value;
-
-        self.stats.upload_bytes.fetch_add(total_upload_size, Ordering::Relaxed);
-        self.stats.copy_operations.fetch_add(subresource_count as u64, Ordering::Relaxed);
-
         Ok(())
     }
 
@@ -1470,7 +1364,7 @@ impl NativeMemory {
             return Err(anyhow::anyhow!("No GPU resource bound to title VA {:#x}", title_va));
         };
 
-        if offset + size > binding.size {
+        if offset.checked_add(size).is_none_or(|end| end > binding.size) {
             return Err(anyhow::anyhow!("Readback exceeds resource bounds"));
         }
 
@@ -1481,10 +1375,10 @@ impl NativeMemory {
                 break alloc;
             }
             let pending = ring.pending.lock().unwrap();
-            if let Some((_, _, oldest_fence)) = pending.first() {
-                if *oldest_fence > 0 {
+            if let Some(&(_, _, oldest_fence)) = pending.first() {
+                if oldest_fence > 0 {
                     drop(pending);
-                    ring.wait_fence(*oldest_fence);
+                    ring.wait_fence(oldest_fence);
                     continue;
                 }
             }
@@ -1494,8 +1388,13 @@ impl NativeMemory {
 
         // Record copy command on copy command list
         let copy_list = self.copy_list.lock().unwrap();
-        let copy_queue = &self.copy_queue;
+        let allocator = self.copy_allocator.lock().unwrap();
         unsafe {
+            allocator.Reset()?;
+            copy_list.Reset(&*allocator, None)?;
+        }
+        unsafe {
+            binding.activate(&copy_list);
             copy_list.CopyBufferRegion(
                 &ring.resource,
                 ring_offset,
@@ -1507,8 +1406,8 @@ impl NativeMemory {
         unsafe { copy_list.Close()? };
 
         // Execute and signal fence
-        let fence_value = self.execute_copy_list()?;
-        ring.wait_fence(fence_value);
+        let fence_value = self.execute_copy_list(&copy_list)?;
+        binding.fence_value.fetch_max(fence_value, Ordering::Release);
 
         // Copy data from ring buffer
         let mut data = vec![0u8; size as usize];
@@ -1554,12 +1453,24 @@ impl NativeMemory {
     /// Get the GPU virtual address for a title VA.
     /// This replaces the directory lookup + shadow copy indirection.
     pub fn get_gpu_va(&self, title_va: u64) -> Option<u64> {
-        self.gpu_bindings.get(&title_va).map(|b| b.gpu_va + (title_va - b.title_va))
+        let binding = self.binding_containing(title_va)?;
+        (binding.dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+            .then(|| binding.gpu_va.checked_add(title_va - binding.title_va)).flatten()
+    }
+
+    fn binding_containing(&self, title_va: u64) -> Option<Arc<GpuResourceBinding>> {
+        if let Some(binding) = self.gpu_bindings.get(&title_va) {
+            return Some(binding.clone());
+        }
+        self.gpu_bindings.iter()
+            .filter(|b| title_va.checked_sub(b.title_va).is_some_and(|offset| offset < b.size))
+            .max_by_key(|b| b.title_va)
+            .map(|b| b.value().clone())
     }
 
     /// Check if a title VA has a GPU resource bound.
     pub fn has_gpu_binding(&self, title_va: u64) -> bool {
-        self.gpu_bindings.contains_key(&title_va)
+        self.binding_containing(title_va).is_some()
     }
 
     /// Get the host allocation for a title VA.
@@ -1573,7 +1484,7 @@ impl NativeMemory {
         let frame = self.frame.fetch_add(1, Ordering::Relaxed);
         
         // Process deferred resource destruction
-        let completed_fence = self.copy_fence.GetCompletedValue();
+        let completed_fence = unsafe { self.copy_fence.GetCompletedValue() };
         self.process_deferred_destruction(completed_fence);
         
         // Also process upload/readback ring fence completion for buffer uploads
@@ -1667,33 +1578,17 @@ impl NativeMemory {
         desc: &D3D12_RESOURCE_DESC,
         uav: bool,
     ) -> anyhow::Result<(ID3D12Resource, u64, u64, Option<ID3D12Heap>)> {
-        let size = self.calculate_texture_size(desc);
-        let alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT as u64;
-        let flags = if uav {
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
-        } else {
-            D3D12_RESOURCE_FLAGS(0)
-        };
-
-        // For swizzled textures (Xbox style), use 64KB_UNDEFINED_SWIZZLE layout
-        let layout = if desc.Format == DXGI_FORMAT_UNKNOWN {
-            D3D12_TEXTURE_LAYOUT_ROW_MAJOR
-        } else if self.is_compressed_format(desc.Format) || desc.MipLevels > 1 {
-            // Use standard layout for compressed formats and mipmapped textures
-            // The driver will handle swizzling internally
-            D3D12_TEXTURE_LAYOUT_UNKNOWN
-        } else {
-            D3D12_TEXTURE_LAYOUT_ROW_MAJOR
-        };
-
+        let mut tex_desc = *desc;
+        if uav { tex_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS; }
+        let info = unsafe { self.device.GetResourceAllocationInfo(0, &[tex_desc]) };
+        anyhow::ensure!(info.SizeInBytes != u64::MAX && info.Alignment != 0, "invalid texture description");
+        let size = info.SizeInBytes;
+        let alignment = info.Alignment;
         // Try existing arenas
         {
             let arenas = self.default_arenas.lock().unwrap();
             for arena in arenas.iter() {
                 if let Some(offset) = arena.allocate(size, alignment) {
-                    let mut tex_desc = desc.clone();
-                    tex_desc.Flags = flags;
-                    tex_desc.Layout = layout;
 
                     let mut resource: Option<ID3D12Resource> = None;
                     unsafe { self.device.CreatePlacedResource(arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
@@ -1703,7 +1598,7 @@ impl NativeMemory {
                     let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
                     // Track allocation
-                    arena.allocations.lock().unwrap().insert(gpu_va, (offset, size));
+                    arena.allocations.lock().unwrap().insert(resource.as_raw() as u64, (offset, size));
 
                     return Ok((resource, gpu_va, offset, Some(arena.heap().clone())));
                 }
@@ -1713,9 +1608,9 @@ impl NativeMemory {
         // Need new arena
         let new_arena = GpuArena::new(
             &self.device,
-            GPU_ARENA_SIZE,
+            GPU_ARENA_SIZE.max(size),
             D3D12_HEAP_TYPE_DEFAULT,
-            D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
+            D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_SHARED,
         )?;
 
         let offset = new_arena.allocate(size, alignment).expect("New arena should have space");
@@ -1723,16 +1618,12 @@ impl NativeMemory {
         let new_arena = Arc::new(new_arena);
         self.default_arenas.lock().unwrap().push(new_arena.clone());
 
-        let mut tex_desc = desc.clone();
-        tex_desc.Flags = flags;
-        tex_desc.Layout = layout;
-
         let mut resource: Option<ID3D12Resource> = None;
         unsafe { self.device.CreatePlacedResource(new_arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
         let resource = resource.unwrap();
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
-        new_arena.allocations.lock().unwrap().insert(gpu_va, (offset, size));
+        new_arena.allocations.lock().unwrap().insert(resource.as_raw() as u64, (offset, size));
 
         Ok((resource, gpu_va, offset, Some(heap_ref)))
     }
@@ -1764,7 +1655,7 @@ impl NativeMemory {
         let size = size.next_multiple_of(PAGE);
 
         // Get the source binding to find its heap location
-        let source_binding = self.gpu_bindings.get(&source_title_va)
+        let source_binding = self.gpu_bindings.get(&source_title_va).map(|entry| entry.value().clone())
             .ok_or_else(|| anyhow::anyhow!("No source GPU resource at title VA {:#x}", source_title_va))?;
 
         let heap = source_binding.heap.as_ref()
@@ -1798,11 +1689,13 @@ impl NativeMemory {
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
-        let binding = Arc::new(GpuResourceBinding::new_buffer(
+        let mut binding = GpuResourceBinding::new_buffer(
             self.device.clone(), title_va, size, resource.clone(), gpu_va, uav
-        ));
+        );
         binding.heap_offset = heap_offset;
         binding.heap = Some(heap.clone());
+        binding.active_alias = source_binding.active_alias.clone();
+        let binding = Arc::new(binding);
 
         // Register as alias on the source binding
         source_binding.add_alias(resource);
@@ -1821,40 +1714,30 @@ impl NativeMemory {
         desc: &D3D12_RESOURCE_DESC,
         uav: bool,
     ) -> anyhow::Result<Arc<GpuResourceBinding>> {
-        let source_binding = self.gpu_bindings.get(&source_title_va)
+        let source_binding = self.gpu_bindings.get(&source_title_va).map(|entry| entry.value().clone())
             .ok_or_else(|| anyhow::anyhow!("No source GPU texture at title VA {:#x}", source_title_va))?;
 
         let heap = source_binding.heap.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Source texture has no heap reference for aliasing"))?;
         let heap_offset = source_binding.heap_offset;
 
-        let size = self.calculate_texture_size(desc);
-        let alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT as u64;
-        let flags = if uav {
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
-        } else {
-            D3D12_RESOURCE_FLAGS(0)
-        };
-
-        let layout = if self.is_compressed_format(desc.Format) || desc.MipLevels > 1 {
-            D3D12_TEXTURE_LAYOUT_UNKNOWN
-        } else {
-            D3D12_TEXTURE_LAYOUT_ROW_MAJOR
-        };
-
-        let mut tex_desc = desc.clone();
-        tex_desc.Flags = flags;
-        tex_desc.Layout = layout;
-
+        let mut tex_desc = *desc;
+        if uav { tex_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS; }
+        let info = unsafe { self.device.GetResourceAllocationInfo(0, &[tex_desc]) };
+        let source = unsafe { self.device.GetResourceAllocationInfo(0, &[source_binding.resource.GetDesc()]) };
+        anyhow::ensure!(info.SizeInBytes <= source.SizeInBytes && info.Alignment != 0 && heap_offset.is_multiple_of(info.Alignment), "alias exceeds source placement");
+        let size = info.SizeInBytes;
         let mut resource: Option<ID3D12Resource> = None;
         unsafe { self.device.CreatePlacedResource(heap, heap_offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
         let resource = resource.unwrap();
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
-        let binding = Arc::new(GpuResourceBinding::new_texture(
+        let mut binding = GpuResourceBinding::new_texture(
             self.device.clone(), title_va, size, resource.clone(), gpu_va, uav, desc, heap_offset, Some(heap.clone())
-        ));
+        );
+        binding.active_alias = source_binding.active_alias.clone();
+        let binding = Arc::new(binding);
 
         // Register as alias on the source binding
         source_binding.add_alias(resource);
@@ -1878,11 +1761,12 @@ impl NativeMemory {
         // Allocate buffer for the acceleration structure
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, false)?;
 
-        let binding = Arc::new(GpuResourceBinding::new_buffer(
+        let mut binding = GpuResourceBinding::new_buffer(
             self.device.clone(), title_va, size, resource.clone(), gpu_va, false
-        ));
+        );
         binding.heap_offset = offset;
         binding.heap = heap;
+        let binding = Arc::new(binding);
 
         // The actual BLAS build is done via command list, not here
         // This just allocates the backing buffer
@@ -1904,11 +1788,12 @@ impl NativeMemory {
         // Allocate buffer for the acceleration structure
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, false)?;
 
-        let binding = Arc::new(GpuResourceBinding::new_buffer(
+        let mut binding = GpuResourceBinding::new_buffer(
             self.device.clone(), title_va, size, resource.clone(), gpu_va, false
-        ));
+        );
         binding.heap_offset = offset;
         binding.heap = heap;
+        let binding = Arc::new(binding);
 
         self.gpu_bindings.insert(title_va, binding.clone());
         self.stats.gpu_resources.fetch_add(1, Ordering::Relaxed);
@@ -2021,20 +1906,37 @@ impl NativeShadow {
         (self.title_va + self.len).saturating_sub(address)
     }
 
-    /// Bring `len` bytes at `address` up to date when `list` is submitted.
-    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
-        let len = len.min(self.title_va + self.len - address);
-        // Read data from title CPU memory and upload to GPU
-        let offset = address - self.title_va;
-        let ptr = address as *const u8;
-        let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        let _ = self.backend.upload_to_gpu(self.title_va, offset, data);
+    fn host_range(&self, address: usize, len: usize) -> (Arc<HostAllocation>, usize, usize) {
+        let allocation = self.backend.allocations.iter().find(|a|
+            (address as u64).checked_sub(a.title_va).is_some_and(|off|
+                off.checked_add(len as u64).is_some_and(|end| end <= a.committed_size))
+        ).expect("native shadow range requires committed title memory").value().clone();
+        let offset = address - allocation.title_va as usize;
+        let resource_offset = address.checked_sub(self.title_va as usize).expect("address precedes binding");
+        assert!(resource_offset.checked_add(len).is_some_and(|end| end <= self.len as usize));
+        (allocation, offset, resource_offset)
     }
 
-    /// Shaders of `list` may write `[address, address + len)` of the copy.
-    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
-        let len = len.min(self.title_va + self.len - address);
-        let _ = self.backend.gpu_writes(self.title_va, address - self.title_va, len);
+    pub(crate) fn update(&self, address: usize, len: usize) -> usize {
+        let (allocation, offset, resource_offset) = self.host_range(address, len);
+        let data = unsafe { std::slice::from_raw_parts(allocation.base_ptr.cast::<u8>().add(offset), len) };
+        self.backend.upload_to_gpu(self.title_va, resource_offset as u64, data).expect("native shadow upload");
+        len
+    }
+
+    pub(crate) fn copy_back(&self, address: usize, len: usize) -> usize {
+        let (allocation, offset, resource_offset) = self.host_range(address, len);
+        let bytes = self.backend.readback_from_gpu(self.title_va, resource_offset as u64, len as u64).expect("native shadow readback");
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), allocation.base_ptr.cast::<u8>().add(offset), len); }
+        len
+    }
+
+    pub(crate) fn refresh(self: &Arc<Self>, list: &HostList, address: u64, len: u64) {
+        list.defer_refresh(&crate::shadow::ShadowHandle::Native(self.clone()), address as usize, len.min(self.left(address)) as usize);
+    }
+
+    pub(crate) fn gpu_writes(self: &Arc<Self>, list: &HostList, address: u64, len: u64) {
+        list.defer_gpu_write(&crate::shadow::ShadowHandle::Native(self.clone()), address as usize, len.min(self.left(address)) as usize);
     }
 
     /// Whether the memory behind the copy turned out not to be write-watched.

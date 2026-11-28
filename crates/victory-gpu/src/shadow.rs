@@ -39,6 +39,13 @@ impl From<Arc<Shadow>> for ShadowHandle {
 }
 
 impl ShadowHandle {
+    pub(crate) fn update(&self, address: usize, len: usize) -> usize {
+        match self {
+            Self::Legacy(s) => s.update(address, len),
+            Self::Native(s) => s.update(address, len),
+        }
+    }
+
     /// Get the GPU virtual address for a title address.
     pub fn gpu(&self, address: u64) -> u64 {
         match self {
@@ -95,6 +102,10 @@ impl ShadowHandle {
         }
     }
 
+    pub(crate) fn nothing_new(&self, address: usize, len: usize) -> bool {
+        matches!(self, Self::Legacy(s) if s.nothing_new(address, len))
+    }
+
     /// Claim this copy's full refresh even when several heaps view it.
     pub fn take_unwatched_refresh(&self, frame: u64) -> bool {
         match self {
@@ -115,7 +126,7 @@ impl ShadowHandle {
     pub fn offset(&self, address: u64) -> u64 {
         match self {
             ShadowHandle::Legacy(s) => s.offset(address),
-            ShadowHandle::Native(_) => 0, // Native backend doesn't use view_home
+            ShadowHandle::Native(s) => address - s.span().0,
         }
     }
 
@@ -228,7 +239,7 @@ impl ShadowHandle {
     pub fn copy_back(&self, address: usize, len: usize) -> usize {
         match self {
             ShadowHandle::Legacy(s) => s.copy_back(address, len),
-            ShadowHandle::Native(_) => 0,
+            ShadowHandle::Native(s) => s.copy_back(address, len),
         }
     }
 
@@ -236,7 +247,7 @@ impl ShadowHandle {
     pub fn copy_back_with(&self, address: usize, len: usize, found: Option<Vec<(usize, usize)>>) -> usize {
         match self {
             ShadowHandle::Legacy(s) => s.copy_back_with(address, len, found),
-            ShadowHandle::Native(_) => 0,
+            ShadowHandle::Native(s) => s.copy_back(address, len),
         }
     }
 }
@@ -491,11 +502,11 @@ pub(crate) fn cards() -> bool {
 /// Default `(min_mb, max_mb)` for [`card_limits`] chosen from the adapter's
 /// local VRAM budget (`DXGI_QUERY_VIDEO_MEMORY_INFO.Budget`), in bytes.
 ///
-/// - Unknown (`None`, e.g. WARP) or `<= 12 GiB` (8–12 GB cards, whose WDDM
+/// - Unknown (`None`, e.g. WARP) or `<= 12 GiB` (8ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ12 GB cards, whose WDDM
 ///   budget is below 12 GiB): `(16, 512)` MiB, matching the 12 GB baseline.
 /// - `> 12 GiB` and `< 20 GiB` (16 GB cards, whose WDDM budget is typically
-///   ~13.5–15.2 GiB): `(4, 2048)` MiB.
-/// - `>= 20 GiB` (24–32+ GB cards): `(1, (budget_mb / 4).min(8192))` MiB,
+///   ~13.5ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ15.2 GiB): `(4, 2048)` MiB.
+/// - `>= 20 GiB` (24ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ32+ GB cards): `(1, (budget_mb / 4).min(8192))` MiB,
 ///   capping at 25% of local budget (at most 8 GiB) so "before" twins (up to 2x)
 ///   still leave headroom for textures and render targets.
 fn default_card_limits_mb(local_vram_budget: Option<u64>) -> (u64, u64) {
@@ -2115,10 +2126,11 @@ fn copy_ranges_wide(copies: Vec<(usize, usize, usize)>) {
 /// and a range `[address, end)` its shaders may have written, declared and
 /// not yet done), the 64 KiB pieces that differ from the snapshot, as
 /// [`Shadow::copy_back_with`] takes them; found on several threads.
-pub(crate) fn find_all(work: &[(Arc<Shadow>, usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+pub(crate) fn find_all(work: &[(ShadowHandle, usize, usize)]) -> Vec<Vec<(usize, usize)>> {
     let scans = work
         .iter()
         .map(|(shadow, address, end)| {
+            let ShadowHandle::Legacy(shadow) = shadow else { return (0, 0, 0, 0, 0) };
             let (from, to) = shadow.inside(*address, end.saturating_sub(*address));
             // The snapshot's memory stays until the range is done with
             // (`copy_back_done`), which comes after this.
@@ -3498,7 +3510,7 @@ impl Shadow {
     /// and keeps the copy alive until the list is reset.
     pub(crate) fn refresh(self: &Arc<Self>, list: &HostList, address: u64, len: u64) {
         let len = len.min(self.start + self.len - address);
-        list.defer_refresh(self, address as usize, len as usize);
+        list.defer_refresh(&self.clone().into(), address as usize, len as usize);
     }
 
     /// The bytes of the host buffer.
@@ -3574,7 +3586,7 @@ impl Shadow {
         }
         self.written.store(true, Ordering::Relaxed);
         let len = len.min(self.left(address));
-        list.defer_gpu_write(self, address as usize, len as usize);
+        list.defer_gpu_write(&self.clone().into(), address as usize, len as usize);
     }
 
     /// At submission, after the range's refresh: a submitted list's shaders
@@ -6183,13 +6195,13 @@ mod window_tests {
         assert_eq!(default_card_limits_mb(Some(11 * GIB)), (16, 512));
         assert_eq!(default_card_limits_mb(Some(12 * GIB)), (16, 512));
 
-        // 16 GB tier (> 12 GiB, < 20 GiB), including WDDM budgets around 13.5–15 GiB.
+        // 16 GB tier (> 12 GiB, < 20 GiB), including WDDM budgets around 13.5ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ15 GiB.
         assert_eq!(default_card_limits_mb(Some(13 * GIB)), (4, 2048));
         assert_eq!(default_card_limits_mb(Some(14 * GIB)), (4, 2048));
         assert_eq!(default_card_limits_mb(Some(15 * GIB)), (4, 2048));
         assert_eq!(default_card_limits_mb(Some(16 * GIB)), (4, 2048));
 
-        // 24–32+ GB tier (>= 20 GiB): 1 MiB min, 25% of budget capped at 8192 MiB.
+        // 24ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ32+ GB tier (>= 20 GiB): 1 MiB min, 25% of budget capped at 8192 MiB.
         assert_eq!(default_card_limits_mb(Some(20 * GIB)), (1, 5120));
         assert_eq!(default_card_limits_mb(Some(24 * GIB)), (1, 6144));
         assert_eq!(default_card_limits_mb(Some(32 * GIB)), (1, 8192));
