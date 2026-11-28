@@ -484,12 +484,8 @@ struct Card {
 /// shaders, as before, and goes back to the title the next time a declared
 /// range holds its piece (before: never).
 pub(crate) fn cards() -> bool {
-    #[cfg(all(windows, feature = "native-memory"))]
-    if crate::memory_backend::is_native_backend_active() {
-        return false;
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_BUFFERS").is_none_or(|v| v != "0"))
+    // Native backend doesn't use card buffers
+    false
 }
 
 /// Default `(min_mb, max_mb)` for [`card_limits`] chosen from the adapter's
@@ -1276,17 +1272,8 @@ mod card_tests {
 ///   ([`card_dirty`]), so that a merge can tell the title's bytes the card
 ///   had not received from bytes the card wrote.
 pub(crate) fn relay() -> bool {
-    #[cfg(all(windows, feature = "native-memory"))]
-    if crate::memory_backend::is_native_backend_active() {
-        return false;
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    // On by default (stage 2, `crate::host::relay_exact`); `VICTORY_RELAY=0`
-    // turns it off, `=1` asks for the first stage.
-    // The crate's own tests run without it unless they ask: several of
-    // them look at title memory right after a submission, which the
-    // relay's landing thread may still be writing.
-    *ON.get_or_init(|| std::env::var("VICTORY_RELAY").map_or(!cfg!(test), |v| v == "1" || v == "2") && !keeps())
+    // Native backend doesn't use relay
+    false
 }
 
 /// The submission being prepared (its number among those started): what
@@ -1870,18 +1857,16 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
 /// run together after the card ([`find_all`]), both cut into pieces of
 /// work of about 1 MiB for a few threads that are kept ([`wide`]). The
 /// bytes taken and the bytes compared are the same ones: a range's bytes
+/// run together after the card ([`card_steps`]), both cut into pieces of
+/// work of about 1 MiB for a few threads that are kept ([`wide`]). The
+/// bytes taken and the bytes compared are the same ones: a range's bytes
 /// cannot change between the moment it is declared and the end of the
 /// preparing (a declared range is left alone by every refresh, the title's
 /// own copies write title memory and not the copy, and the card runs the
 /// lists only afterwards).
 pub(crate) fn wide_back() -> bool {
-    #[cfg(all(windows, feature = "native-memory"))]
-    if crate::memory_backend::is_native_backend_active() {
-        return false;
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    // On by default; `VICTORY_WIDE_BACK=0` turns it off.
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_BACK").is_none_or(|v| v != "0"))
+    // Native backend doesn't use wide back
+    false
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -5467,14 +5452,10 @@ fn buffers_read() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize), 
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
-    // Check if native backend is active
-    #[cfg(all(windows, feature = "native-memory"))]
-    if crate::memory_backend::is_native_backend_active() {
-        if let Some(backend) = crate::memory_backend::memory_backend() {
-            let _ = backend.register_buffer(resource, start, len);
-            // Also create GPU resource in native backend
-            let _ = backend.create_gpu_resource(start, len, true);
-        }
+    if let Some(backend) = crate::memory_backend::memory_backend() {
+        let _ = backend.register_buffer(resource, start, len);
+        // Also create GPU resource in native backend
+        let _ = backend.create_gpu_resource(start, len, true);
         return;
     }
     buffers().insert(
@@ -5488,32 +5469,18 @@ pub(crate) fn register(resource: usize, start: u64, len: u64) {
 
 /// The title released it; lists that still hold its copy keep it alive.
 pub(crate) fn unregister(resource: usize, start: u64) {
-    // Check if native backend is active
-    #[cfg(all(windows, feature = "native-memory"))]
-    if crate::memory_backend::is_native_backend_active() {
-        if let Some(backend) = crate::memory_backend::memory_backend() {
-            let _ = backend.unregister_buffer(resource, start);
-            let _ = backend.free(start);
-        }
-        return;
+    if let Some(backend) = crate::memory_backend::memory_backend() {
+        let _ = backend.unregister_buffer(resource, start);
+        let _ = backend.free(start);
     }
     buffers().remove(&(start, resource));
 }
 
-/// Get GPU virtual address for a title address, using native backend if active.
-/// This is a unified API that works with both legacy and native backends.
-#[cfg(all(windows, feature = "native-memory"))]
+/// Get GPU virtual address for a title address, using native backend.
+/// This is a unified API that works with the native backend.
+#[cfg(windows)]
 pub(crate) fn gpu_va_for_address(address: u64) -> Option<u64> {
-    if crate::memory_backend::is_native_backend_active() {
-        crate::memory_backend::memory_backend().and_then(|b| b.get_gpu_va(address))
-    } else {
-        find(address, 1).map(|s| s.gpu(address))
-    }
-}
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-pub(crate) fn gpu_va_for_address(address: u64) -> Option<u64> {
-    find(address, 1).map(|s| s.gpu(address))
+    crate::memory_backend::memory_backend().and_then(|b| b.get_gpu_va(address))
 }
 
 #[cfg(not(windows))]
@@ -5583,33 +5550,24 @@ pub(crate) fn find(address: u64, len: u64) -> Option<Arc<Shadow>> {
 }
 
 /// Backend-aware version of `find` that returns a ShadowHandle.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    if crate::memory_backend::is_native_backend_active() {
-        // For native backend, create a NativeShadow for this range
-        if let Some(native_mem) = crate::native_mem::native_memory() {
-            // Check if there's a GPU binding for this address
-            if native_mem.has_gpu_binding(address) {
-                let len = len.max(1);
-                if let Ok(shadow) = crate::native_mem::NativeShadow::new(
-                    native_mem,
-                    address,
-                    len,
-                    true,
-                ) {
-                    return Some(ShadowHandle::Native(shadow));
-                }
+    if let Some(native_mem) = crate::native_mem::native_memory() {
+        // Check if there's a GPU binding for this address
+        if native_mem.has_gpu_binding(address) {
+            let len = len.max(1);
+            if let Ok(shadow) = crate::native_mem::NativeShadow::new(
+                native_mem,
+                address,
+                len,
+                true,
+            ) {
+                return Some(ShadowHandle::Native(shadow));
             }
         }
         None
     } else {
         find(address, len).map(ShadowHandle::Legacy)
     }
-}
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    find(address, len).map(ShadowHandle)
 }
 
 /// As [`find`], for an ask that is done with the copy when its list has
@@ -5639,31 +5597,23 @@ pub(crate) fn find_known(address: u64, len: u64) -> Option<Arc<Shadow>> {
 }
 
 /// Backend-aware version of `find_known` that returns a ShadowHandle.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(crate) fn find_known_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    if crate::memory_backend::is_native_backend_active() {
-        if let Some(native_mem) = crate::native_mem::native_memory() {
-            if native_mem.has_gpu_binding(address) {
-                let len = len.max(1);
-                if let Ok(shadow) = crate::native_mem::NativeShadow::new(
-                    native_mem,
-                    address,
-                    len,
-                    true,
-                ) {
-                    return Some(ShadowHandle::Native(shadow));
-                }
+    if let Some(native_mem) = crate::native_mem::native_memory() {
+        if native_mem.has_gpu_binding(address) {
+            let len = len.max(1);
+            if let Ok(shadow) = crate::native_mem::NativeShadow::new(
+                native_mem,
+                address,
+                len,
+                true,
+            ) {
+                return Some(ShadowHandle::Native(shadow));
             }
         }
         None
     } else {
         find_known(address, len).map(ShadowHandle::Legacy)
     }
-}
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-pub(crate) fn find_known_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    find_known(address, len).map(ShadowHandle)
 }
 
 pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
@@ -5676,31 +5626,23 @@ pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
 }
 
 /// Backend-aware version of `find_any` that returns a ShadowHandle.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(crate) fn find_any_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    if crate::memory_backend::is_native_backend_active() {
-        if let Some(native_mem) = crate::native_mem::native_memory() {
-            if native_mem.has_gpu_binding(address) {
-                let len = len.max(1);
-                if let Ok(shadow) = crate::native_mem::NativeShadow::new(
-                    native_mem,
-                    address,
-                    len,
-                    true,
-                ) {
-                    return Some(ShadowHandle::Native(shadow));
-                }
+    if let Some(native_mem) = crate::native_mem::native_memory() {
+        if native_mem.has_gpu_binding(address) {
+            let len = len.max(1);
+            if let Ok(shadow) = crate::native_mem::NativeShadow::new(
+                native_mem,
+                address,
+                len,
+                true,
+            ) {
+                return Some(ShadowHandle::Native(shadow));
             }
         }
         None
     } else {
         find_any(address, len).map(ShadowHandle::Legacy)
     }
-}
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-pub(crate) fn find_any_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    find_any(address, len).map(ShadowHandle)
 }
 
 /// The copy [`find`] gives for a range inside a title buffer, if it was made.
