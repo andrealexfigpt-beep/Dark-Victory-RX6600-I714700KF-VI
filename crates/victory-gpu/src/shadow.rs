@@ -24,6 +24,300 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 use crate::host::{HostList, host};
 use crate::watch::PAGE;
 
+/// Unified shadow handle that works with both legacy and native backends.
+/// Provides a common API for GPU VA lookup, refresh, and GPU write tracking.
+#[cfg(all(windows, feature = "native-memory"))]
+#[derive(Clone)]
+pub enum ShadowHandle {
+    Legacy(Arc<Shadow>),
+    Native(Arc<crate::native_mem::NativeShadow>),
+}
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+#[derive(Clone)]
+pub struct ShadowHandle(pub Arc<Shadow>);
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+impl ShadowHandle {
+    /// Get the GPU virtual address for a title address.
+    pub fn gpu(&self, address: u64) -> u64 {
+        self.0.gpu(address)
+    }
+
+    /// The title memory the copy is of: its start and length.
+    pub fn span(&self) -> (u64, u64) {
+        self.0.span()
+    }
+
+    /// The offset of a title address in the copy, if it lies in it.
+    pub fn offset_in(&self, address: u64) -> Option<u64> {
+        self.0.offset_in(address)
+    }
+
+    /// Bytes from a title address to the buffer's end.
+    pub fn left(&self, address: u64) -> u64 {
+        self.0.left(address)
+    }
+
+    /// Bring `len` bytes at `address` up to date when `list` is submitted.
+    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
+        self.0.refresh(list, address, len)
+    }
+
+    /// Shaders of `list` may write `[address, address + len)` of the copy.
+    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
+        self.0.gpu_writes(list, address, len)
+    }
+
+    /// Whether the memory behind the copy turned out not to be write-watched.
+    pub fn unwatched(&self) -> bool {
+        self.0.unwatched()
+    }
+
+    /// Claim this copy's full refresh even when several heaps view it.
+    pub fn take_unwatched_refresh(&self, frame: u64) -> bool {
+        self.0.take_unwatched_refresh(frame)
+    }
+
+    /// Get the underlying D3D12 resource for descriptor creation.
+    pub fn resource(&self) -> &ID3D12Resource {
+        &self.0.buffer
+    }
+
+    /// Offset of a title address from the buffer's start (legacy only, for view_home).
+    pub fn offset(&self, address: u64) -> u64 {
+        self.0.offset(address)
+    }
+
+    /// Compare pointer equality of the inner Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        self.0.width()
+    }
+}
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+impl From<Arc<Shadow>> for ShadowHandle {
+    fn from(s: Arc<Shadow>) -> Self {
+        ShadowHandle(s)
+    }
+}
+
+#[cfg(all(windows, feature = "native-memory"))]
+impl From<Arc<Shadow>> for ShadowHandle {
+    fn from(s: Arc<Shadow>) -> Self {
+        ShadowHandle::Legacy(s)
+    }
+}
+
+#[cfg(all(windows, feature = "native-memory"))]
+impl ShadowHandle {
+    /// Get the GPU virtual address for a title address.
+    pub fn gpu(&self, address: u64) -> u64 {
+        match self {
+            ShadowHandle::Legacy(s) => s.gpu(address),
+            ShadowHandle::Native(s) => s.gpu(address),
+        }
+    }
+
+    /// The title memory the copy is of: its start and length.
+    pub fn span(&self) -> (u64, u64) {
+        match self {
+            ShadowHandle::Legacy(s) => s.span(),
+            ShadowHandle::Native(s) => s.span(),
+        }
+    }
+
+    /// The offset of a title address in the copy, if it lies in it.
+    pub fn offset_in(&self, address: u64) -> Option<u64> {
+        match self {
+            ShadowHandle::Legacy(s) => s.offset_in(address),
+            ShadowHandle::Native(s) => s.offset_in(address),
+        }
+    }
+
+    /// Bytes from a title address to the buffer's end.
+    pub fn left(&self, address: u64) -> u64 {
+        match self {
+            ShadowHandle::Legacy(s) => s.left(address),
+            ShadowHandle::Native(s) => s.left(address),
+        }
+    }
+
+    /// Bring `len` bytes at `address` up to date when `list` is submitted.
+    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
+        match self {
+            ShadowHandle::Legacy(s) => s.refresh(list, address, len),
+            ShadowHandle::Native(s) => s.refresh(list, address, len),
+        }
+    }
+
+    /// Shaders of `list` may write `[address, address + len)` of the copy.
+    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
+        match self {
+            ShadowHandle::Legacy(s) => s.gpu_writes(list, address, len),
+            ShadowHandle::Native(s) => s.gpu_writes(list, address, len),
+        }
+    }
+
+    /// Whether the memory behind the copy turned out not to be write-watched.
+    pub fn unwatched(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.unwatched(),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Claim this copy's full refresh even when several heaps view it.
+    pub fn take_unwatched_refresh(&self, frame: u64) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.take_unwatched_refresh(frame),
+            ShadowHandle::Native(_) => true, // Native backend always refreshes
+        }
+    }
+
+    /// Get the underlying D3D12 resource for descriptor creation.
+    pub fn resource(&self) -> &ID3D12Resource {
+        match self {
+            ShadowHandle::Legacy(s) => &s.buffer,
+            ShadowHandle::Native(s) => s.resource(),
+        }
+    }
+
+    /// Offset of a title address from the buffer's start (legacy only, for view_home).
+    pub fn offset(&self, address: u64) -> u64 {
+        match self {
+            ShadowHandle::Legacy(s) => s.offset(address),
+            ShadowHandle::Native(_) => 0, // Native backend doesn't use view_home
+        }
+    }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        match self {
+            ShadowHandle::Legacy(s) => s.width(),
+            ShadowHandle::Native(s) => s.width(),
+        }
+    }
+
+    /// Whether the copy has any pending GPU writes.
+    pub fn writes_pending(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.writes_pending(),
+            ShadowHandle::Native(_) => false, // Native backend doesn't track writes this way
+        }
+    }
+
+    /// Whether the copy has pending GPU writes in the given range.
+    pub fn writes_pending_in(&self, from: usize, to: usize) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.writes_pending_in(from, to),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Whether the memory is stale under GPU writes.
+    pub fn stale_under_writes(&self, address: usize, len: usize) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.stale_under_writes(address, len),
+            ShadowHandle::Native(_) => false, // Native backend doesn't track staleness this way
+        }
+    }
+
+    /// Merges the given range under GPU writes, returns true if merged.
+    pub fn merge_under_writes(&self, address: usize, len: usize, runs_left: &mut usize) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.merge_under_writes(address, len, runs_left),
+            ShadowHandle::Native(_) => true, // Native backend always merges
+        }
+    }
+
+    /// Compare pointer equality of the inner Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ShadowHandle::Legacy(a), ShadowHandle::Legacy(b)) => std::sync::Arc::ptr_eq(a, b),
+            (ShadowHandle::Native(a), ShadowHandle::Native(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// Get a unique pointer key for use as a map key.
+    pub fn as_ptr(&self) -> usize {
+        match self {
+            ShadowHandle::Legacy(a) => std::sync::Arc::as_ptr(a) as usize,
+            ShadowHandle::Native(a) => std::sync::Arc::as_ptr(a) as usize,
+        }
+    }
+
+    /// Whether a submission asks the kernel about the copy's ranges ahead.
+    pub fn asked_ahead(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.asked_ahead(),
+            ShadowHandle::Native(_) => false, // Native backend doesn't track this
+        }
+    }
+
+    /// Mark that shaders are writing to a range of the copy.
+    pub fn writing(&self, address: usize, len: usize) {
+        match self {
+            ShadowHandle::Legacy(s) => s.writing(address, len),
+            ShadowHandle::Native(_) => {}, // Native backend handles this differently
+        }
+    }
+
+    /// Whether this copy is carded (part of the card's memory).
+    pub fn carded(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.carded(),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Whether this copy is in-place (title memory in place).
+    pub fn in_place(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.in_place(),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Compare this copy's relay pages with another copy's.
+    pub fn relay_compared(&self, address: usize, len: usize) {
+        match self {
+            ShadowHandle::Legacy(s) => s.relay_compared(address, len),
+            ShadowHandle::Native(_) => {},
+        }
+    }
+
+    /// Copy back the given ranges from GPU to CPU.
+    pub fn copy_back_done(&self, ranges: &[(usize, usize)]) {
+        match self {
+            ShadowHandle::Legacy(s) => s.copy_back_done(ranges),
+            ShadowHandle::Native(_) => {},
+        }
+    }
+
+    /// Copy back a range from GPU to CPU, returning the number of bytes copied.
+    pub fn copy_back(&self, address: usize, len: usize) -> usize {
+        match self {
+            ShadowHandle::Legacy(s) => s.copy_back(address, len),
+            ShadowHandle::Native(_) => 0,
+        }
+    }
+
+    /// Copy back a range from GPU to CPU with additional found ranges, returning the number of bytes copied.
+    pub fn copy_back_with(&self, address: usize, len: usize, found: Option<Vec<(usize, usize)>>) -> usize {
+        match self {
+            ShadowHandle::Legacy(s) => s.copy_back_with(address, len, found),
+            ShadowHandle::Native(_) => 0,
+        }
+    }
+}
+
 /// Positive proofs that ranges of one host copy were unchanged. A proof is
 /// reused only under the same write-watch/guard epoch and GPU-pending epoch;
 /// the journal check remains the fallback whenever either has moved.
@@ -267,6 +561,10 @@ struct Card {
 /// shaders, as before, and goes back to the title the next time a declared
 /// range holds its piece (before: never).
 pub(crate) fn cards() -> bool {
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_BUFFERS").is_none_or(|v| v != "0"))
 }
@@ -1055,6 +1353,10 @@ mod card_tests {
 ///   ([`card_dirty`]), so that a merge can tell the title's bytes the card
 ///   had not received from bytes the card wrote.
 pub(crate) fn relay() -> bool {
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // On by default (stage 2, `crate::host::relay_exact`); `VICTORY_RELAY=0`
     // turns it off, `=1` asks for the first stage.
@@ -1650,6 +1952,10 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
 /// own copies write title memory and not the copy, and the card runs the
 /// lists only afterwards).
 pub(crate) fn wide_back() -> bool {
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // On by default; `VICTORY_WIDE_BACK=0` turns it off.
     *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_BACK").is_none_or(|v| v != "0"))
@@ -5238,6 +5544,16 @@ fn buffers_read() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize), 
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
+    // Check if native backend is active
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        if let Some(backend) = crate::memory_backend::memory_backend() {
+            let _ = backend.register_buffer(resource, start, len);
+            // Also create GPU resource in native backend
+            let _ = backend.create_gpu_resource(start, len, true);
+        }
+        return;
+    }
     buffers().insert(
         (start, resource),
         Entry {
@@ -5249,7 +5565,37 @@ pub(crate) fn register(resource: usize, start: u64, len: u64) {
 
 /// The title released it; lists that still hold its copy keep it alive.
 pub(crate) fn unregister(resource: usize, start: u64) {
+    // Check if native backend is active
+    #[cfg(all(windows, feature = "native-memory"))]
+    if crate::memory_backend::is_native_backend_active() {
+        if let Some(backend) = crate::memory_backend::memory_backend() {
+            let _ = backend.unregister_buffer(resource, start);
+            let _ = backend.free(start);
+        }
+        return;
+    }
     buffers().remove(&(start, resource));
+}
+
+/// Get GPU virtual address for a title address, using native backend if active.
+/// This is a unified API that works with both legacy and native backends.
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) fn gpu_va_for_address(address: u64) -> Option<u64> {
+    if crate::memory_backend::is_native_backend_active() {
+        crate::memory_backend::memory_backend().and_then(|b| b.get_gpu_va(address))
+    } else {
+        find(address, 1).map(|s| s.gpu(address))
+    }
+}
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+pub(crate) fn gpu_va_for_address(address: u64) -> Option<u64> {
+    find(address, 1).map(|s| s.gpu(address))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn gpu_va_for_address(_address: u64) -> Option<u64> {
+    None
 }
 
 /// The title buffer holding `address`, as (start, length), without making
@@ -5313,6 +5659,36 @@ pub(crate) fn find(address: u64, len: u64) -> Option<Arc<Shadow>> {
     lookup(address, len, false)
 }
 
+/// Backend-aware version of `find` that returns a ShadowHandle.
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
+    if crate::memory_backend::is_native_backend_active() {
+        // For native backend, create a NativeShadow for this range
+        if let Some(native_mem) = crate::native_mem::native_memory() {
+            // Check if there's a GPU binding for this address
+            if native_mem.has_gpu_binding(address) {
+                let len = len.max(1);
+                if let Ok(shadow) = crate::native_mem::NativeShadow::new(
+                    native_mem,
+                    address,
+                    len,
+                    true,
+                ) {
+                    return Some(ShadowHandle::Native(shadow));
+                }
+            }
+        }
+        None
+    } else {
+        find(address, len).map(ShadowHandle::Legacy)
+    }
+}
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
+    find(address, len).map(ShadowHandle)
+}
+
 /// As [`find`], for an ask that is done with the copy when its list has
 /// run (a draw's vertex and index buffers, indirect arguments): outside
 /// buffer objects it takes a window that is there already and holds the
@@ -5339,6 +5715,34 @@ pub(crate) fn find_known(address: u64, len: u64) -> Option<Arc<Shadow>> {
     lookup_with(address, len, true, known_grid(len), false, 1)
 }
 
+/// Backend-aware version of `find_known` that returns a ShadowHandle.
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) fn find_known_handle(address: u64, len: u64) -> Option<ShadowHandle> {
+    if crate::memory_backend::is_native_backend_active() {
+        if let Some(native_mem) = crate::native_mem::native_memory() {
+            if native_mem.has_gpu_binding(address) {
+                let len = len.max(1);
+                if let Ok(shadow) = crate::native_mem::NativeShadow::new(
+                    native_mem,
+                    address,
+                    len,
+                    true,
+                ) {
+                    return Some(ShadowHandle::Native(shadow));
+                }
+            }
+        }
+        None
+    } else {
+        find_known(address, len).map(ShadowHandle::Legacy)
+    }
+}
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+pub(crate) fn find_known_handle(address: u64, len: u64) -> Option<ShadowHandle> {
+    find_known(address, len).map(ShadowHandle)
+}
+
 pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
     // With whole windows (the default) there is one window to a cell and
     // nothing to choose: exactly `find`.
@@ -5346,6 +5750,34 @@ pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
         return find(address, len);
     }
     lookup(address, len, true)
+}
+
+/// Backend-aware version of `find_any` that returns a ShadowHandle.
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) fn find_any_handle(address: u64, len: u64) -> Option<ShadowHandle> {
+    if crate::memory_backend::is_native_backend_active() {
+        if let Some(native_mem) = crate::native_mem::native_memory() {
+            if native_mem.has_gpu_binding(address) {
+                let len = len.max(1);
+                if let Ok(shadow) = crate::native_mem::NativeShadow::new(
+                    native_mem,
+                    address,
+                    len,
+                    true,
+                ) {
+                    return Some(ShadowHandle::Native(shadow));
+                }
+            }
+        }
+        None
+    } else {
+        find_any(address, len).map(ShadowHandle::Legacy)
+    }
+}
+
+#[cfg(all(windows, not(feature = "native-memory")))]
+pub(crate) fn find_any_handle(address: u64, len: u64) -> Option<ShadowHandle> {
+    find_any(address, len).map(ShadowHandle)
 }
 
 /// The copy [`find`] gives for a range inside a title buffer, if it was made.

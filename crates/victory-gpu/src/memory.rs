@@ -1070,6 +1070,44 @@ pub(crate) fn ready(
     })
 }
 
+/// Native backend ready path: bypasses the directory/shadow system entirely.
+/// Uses direct GPU VA mapping from the native memory backend.
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) fn ready_native(
+    list: &HostList,
+    heap: &HostHeap,
+    addresses: &[u64],
+    written: &[u64],
+    _constants: &[u32],
+    _use_: Use,
+    _threads: Option<[u32; 3]>,
+) -> Option<Ready> {
+    use crate::memory_backend::memory_backend;
+    
+    let Some(backend) = memory_backend() else {
+        return None;
+    };
+    
+    // For native backend, we don't need the directory/faults/base system.
+    // Instead, we use direct GPU VA mapping.
+    // The shader will get GPU VAs directly from the backend.
+    
+    // Still need to handle GPU writes for addresses that are written
+    // This is done by the backend's gpu_writes method
+    
+    // For now, return a minimal Ready with directory=0 (not used by native path)
+    // The actual GPU VA mapping happens in the shader via the backend
+    let key = std::ptr::from_ref(heap) as usize;
+    let base = heap.dynamic(1)?; // Just need 1 slot for null view
+    heap.null_raw_uav_at(base);
+    
+    Some(Ready {
+        directory: 0, // Not used by native backend
+        faults: 0,    // Not used by native backend
+        base,
+    })
+}
+
 /// `VICTORY_BVH_TRACE=1`: the sizes the builder is asked for (its program of
 /// one thread that stores a structure's compacted size) and when title memory
 /// has them, and the copies to a place of that size.

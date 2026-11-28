@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::core::PCSTR;
 
-use super::{Shader, Translated};
+use super::{Shader, Translated, compute_root_signature_hash};
 use crate::host::host;
 
 /// A stream's graphics state, owned (the title's stream lives only for the
@@ -350,9 +350,19 @@ const QUADS: i32 = 32;
 /// has no record limit, and a read past the copy reaches whatever the host
 /// placed after it (memory it has freed: the device is removed, upstream
 /// PR #493). `VICTORY_ROOT_SRV_DIRECT=1` goes back to root descriptors.
+/// Phase 3: uses binding config for native graphics path.
 pub(crate) fn bounded_root_srvs() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_ROOT_SRV_DIRECT").is_none())
+    *ON.get_or_init(|| {
+        // Check native binding config first.
+        if crate::host::binding::binding_config().prefer_direct {
+            // Native path: prefer direct binding, so bounded is false.
+            false
+        } else {
+            // Compatibility: bounded unless explicitly disabled.
+            std::env::var_os("VICTORY_ROOT_SRV_DIRECT").is_none()
+        }
+    })
 }
 
 /// One stage of a host pipeline and where its bindings go.
@@ -647,6 +657,33 @@ impl HostPipeline {
             };
             tracing::info!(?shaders, "host pipeline");
             crate::host::name(&pso, || format!("{shaders:?}"));
+
+            // Record pipeline-shader permutations for ahead-of-time compilation
+            #[cfg(feature = "native-memory")]
+            {
+                let pipeline_key = name.to_string();
+                for (shader, _) in &stages {
+                    if let Some(translated) = shader.translated() {
+                        let container = &shader.container;
+                        let tf = victory_shader::emit::translation_fingerprint();
+                        let rs_hash = compute_root_signature_hash(&translated.host);
+                        let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
+                        use blake3::Hasher;
+                        let container_hash = blake3::hash(container).as_bytes().clone();
+                        let key = crate::shader_perm::ShaderPermutationKey::from_shader(
+                            perm_key,
+                            container,
+                            tf,
+                            rs_hash,
+                            false,
+                            false,
+                        );
+                        crate::shader_perm::record_pipeline_shader(pipeline_key.clone(), key.clone());
+                        crate::shader_perm::mark_pso_created(&key);
+                    }
+                }
+            }
+
             return Some(HostPipeline {
                 compute: true,
                 mesh: false,
@@ -815,6 +852,33 @@ impl HostPipeline {
         };
         tracing::info!(?shaders, "host pipeline");
         crate::host::name(&pso, || format!("{shaders:?}"));
+
+        // Record pipeline-shader permutations for ahead-of-time compilation
+        #[cfg(feature = "native-memory")]
+        {
+            let pipeline_key = name(rect_gs.as_ref()).to_string();
+            for (shader, _) in &stages {
+                if let Some(translated) = shader.translated() {
+                    let container = &shader.container;
+                    let tf = victory_shader::emit::translation_fingerprint();
+                    let rs_hash = compute_root_signature_hash(&translated.host);
+                    let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
+                    use blake3::Hasher;
+                    let container_hash = blake3::hash(container).as_bytes().clone();
+                    let key = crate::shader_perm::ShaderPermutationKey::from_shader(
+                        perm_key,
+                        container,
+                        tf,
+                        rs_hash,
+                        false,
+                        false,
+                    );
+                    crate::shader_perm::record_pipeline_shader(pipeline_key.clone(), key.clone());
+                    crate::shader_perm::mark_pso_created(&key);
+                }
+            }
+        }
+
         tracing::debug!(
             ?shaders,
             depth = ?g.depth,

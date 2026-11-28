@@ -30,7 +30,14 @@ use crate::shadow::Shadow;
 
 pub(crate) fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_UPCOPY_CHECK").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        // Upcheck only works with legacy backend
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            return false;
+        }
+        std::env::var_os("VICTORY_UPCOPY_CHECK").is_some_and(|v| v == "1")
+    })
 }
 
 /// One dispatch looks at up to a piece: `words` words of the card's buffer
@@ -323,11 +330,17 @@ static CROSSED: Mutex<(u64, Crossed)> = Mutex::new((0, BTreeMap::new()));
 /// (nothing waits for it), and no later one knows that it was too early but
 /// for the landing's own write.
 pub(super) fn reads(runs: &[&HostList]) {
-    let mut writes: Vec<(std::sync::Arc<Shadow>, usize, usize)> = Vec::new();
+    #[cfg(all(windows, feature = "native-memory"))]
+    let mut writes: Vec<(crate::shadow::ShadowHandle, usize, usize)> = Vec::new();
+    #[cfg(not(all(windows, feature = "native-memory")))]
+    let mut writes: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> = Vec::new();
     let mut all = Vec::new();
     for item in &super::line().line {
         if let Late::Run(flight) = item {
             for (shadow, ranges) in &flight.back {
+                #[cfg(all(windows, feature = "native-memory"))]
+                writes.extend(ranges.iter().map(|&(a, b)| (shadow.clone(), a, b)));
+                #[cfg(not(all(windows, feature = "native-memory")))]
                 writes.extend(ranges.iter().map(|&(a, b)| (shadow.clone(), a, b)));
                 join_ranges(&mut all, ranges.iter().copied());
             }
@@ -347,7 +360,7 @@ pub(super) fn reads(runs: &[&HostList]) {
                 continue;
             }
             for (writer, a, b) in &writes {
-                if *a < to && from < *b && !std::sync::Arc::ptr_eq(writer, shadow) {
+                if *a < to && from < *b && !writer.ptr_eq(shadow) {
                     let e = crossed.1.entry((shadow.span(), writer.span())).or_default();
                     *e = (e.0 + 1, (*a).max(from), (*b).min(to));
                 }

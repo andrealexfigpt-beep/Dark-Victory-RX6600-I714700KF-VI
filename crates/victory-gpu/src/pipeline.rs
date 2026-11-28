@@ -206,6 +206,32 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         None => Vec::new(),
     };
     let host = crate::shader_cache::host_shader(container)?;
+    
+    // Record shader permutation for ahead-of-time compilation tracking
+    #[cfg(feature = "native-memory")]
+    {
+        let translation_fingerprint = victory_shader::emit::translation_fingerprint();
+        let root_signature_hash = compute_root_signature_hash(&host);
+        let wave_mismatch = host.stage == HwStage::Cs && host.user_data_dwords() > 0; // Simplified
+        let cross_lane = false; // Would need to analyze the shader IR
+        
+        // Find the stage of the translated program
+        let stage = programs.iter()
+            .find(|p| matches!(p.stage, HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs))
+            .map(|p| p.stage)
+            .unwrap_or(HwStage::Cs);
+        
+        crate::shader_perm::record_translation(
+            stage,
+            container,
+            translation_fingerprint,
+            root_signature_hash,
+            wave_mismatch,
+            cross_lane,
+            &host,
+        );
+    }
+    
     let stores = programs.is_empty() || programs.iter().any(stores);
     let threads = programs.iter().find_map(|p| match &p.io {
         victory_shader::native::StageIo::Cs(cs) if cs.threads.iter().all(|&n| n > 0) => Some(cs.threads),
@@ -230,6 +256,72 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         stores_by_address,
         picks: Default::default(),
     })
+}
+
+/// Compute a hash of the root signature description that would be created
+/// from a translated shader. This is used for permutation deduplication.
+#[cfg(windows)]
+pub(crate) fn compute_root_signature_hash(host: &victory_shader::emit::HostShader) -> [u8; 32] {
+    use blake3::Hasher;
+    let mut h = Hasher::new();
+    h.update(&[host.stage as u8]);
+    h.update(&(host.user_data.len() as u32).to_le_bytes());
+    for u in &host.user_data {
+        h.update(&u.index.to_le_bytes());
+        h.update(&[u.slot]);
+        h.update(&root_type_to_u32(u.root).to_le_bytes());
+        h.update(&u.dword.to_le_bytes());
+    }
+    h.update(&(host.samplers.len() as u32).to_le_bytes());
+    for s in &host.samplers {
+        for &word in s {
+            h.update(&word.to_le_bytes());
+        }
+    }
+    h.update(&(host.static_samplers.len() as u32).to_le_bytes());
+    for s in &host.static_samplers {
+        h.update(&s.filter.to_le_bytes());
+        h.update(&s.address[0].to_le_bytes());
+        h.update(&s.address[1].to_le_bytes());
+        h.update(&s.address[2].to_le_bytes());
+        h.update(&s.mip_lod_bias.to_le_bytes());
+        h.update(&s.max_anisotropy.to_le_bytes());
+        h.update(&s.comparison.to_le_bytes());
+        h.update(&s.border.to_le_bytes());
+        h.update(&s.min_lod.to_le_bytes());
+        h.update(&s.max_lod.to_le_bytes());
+    }
+    for v in &host.root_cbvs {
+        h.update(&[*v]);
+    }
+    for v in &host.root_srvs {
+        h.update(&[*v]);
+    }
+    for v in &host.root_uavs {
+        h.update(&[*v]);
+    }
+    h.update(&(host.root_indexed_views.len() as u32).to_le_bytes());
+    for v in &host.root_indexed_views {
+        h.update(&[v.table_slot]);
+        h.update(&[v.constant_slot]);
+        h.update(&v.constant_dword.to_le_bytes());
+        h.update(&v.byte_offset.to_le_bytes());
+        h.update(&[v.shift]);
+    }
+    h.finalize().as_bytes().clone()
+}
+
+#[cfg(windows)]
+fn root_type_to_u32(rt: victory_shader::RootType) -> u32 {
+    match rt {
+        victory_shader::RootType::Constants => 0,
+        victory_shader::RootType::Descriptor => 1,
+        victory_shader::RootType::Table => 2,
+        victory_shader::RootType::ImmediateSampler => 3,
+        victory_shader::RootType::ResourceHeap => 4,
+        victory_shader::RootType::SamplerHeap => 5,
+        victory_shader::RootType::Other(x) => 6 + x,
+    }
 }
 
 /// The compute pipelines of the console's ray-tracing structure builder
