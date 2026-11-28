@@ -184,6 +184,7 @@ impl ShadowHandle {
             ShadowHandle::Native(s) => s.width(),
         }
     }
+}
 
 /// Positive proofs that ranges of one host copy were unchanged. A proof is
 /// reused only under the same write-watch/guard epoch and GPU-pending epoch;
