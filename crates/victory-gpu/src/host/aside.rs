@@ -13,6 +13,9 @@
 use super::*;
 
 /// A host copy, and the title memory of it (from, to).
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) type Refresh = (crate::shadow::ShadowHandle, u64, u64);
+#[cfg(not(all(windows, feature = "native-memory")))]
 pub(crate) type Refresh = (std::sync::Arc<crate::shadow::Shadow>, u64, u64);
 
 /// What is being found, until it is.
