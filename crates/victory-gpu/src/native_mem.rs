@@ -22,9 +22,10 @@ use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{HANDLE, CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VIRTUAL_ALLOCATION_TYPE, PAGE_PROTECTION_FLAGS};
+use windows::Win32::System::Memory::{VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, PAGE_NOACCESS};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 use windows::core::Interface;
+use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT as SYS_MEM_COMMIT, MEM_RESERVE as SYS_MEM_RESERVE, PAGE_READWRITE as SYS_PAGE_READWRITE, PAGE_NOACCESS as SYS_PAGE_NOACCESS, MEM_RELEASE as SYS_MEM_RELEASE};
 
 use crate::host::{host, Host, HostList};
 use crate::resource::{AllocationInfo, footprint};
@@ -488,7 +489,7 @@ impl UploadRing {
     /// Returns (offset, mapped_ptr) or None if full (caller should wait and retry).
     /// Implements fence-safe wraparound: waits for oldest pending allocation
     /// to complete before reusing its space.
-    pub pub fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+    pub fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
         let size = size.next_multiple_of(alignment);
         
         // Try to allocate without wraparound first
@@ -552,7 +553,7 @@ impl UploadRing {
 
     /// Signal the fence after recording copy commands.
     /// Updates the fence value for all pending allocations that don't have one yet.
-    fn signal_fence(&self, queue: &ID3D12CommandQueue) -> u64 {
+    pub fn signal_fence(&self, queue: &ID3D12CommandQueue) -> u64 {
         let value = self.fence_value.fetch_add(1, Ordering::AcqRel);
         unsafe { queue.Signal(&self.fence, value) }.ok();
         
@@ -568,13 +569,13 @@ impl UploadRing {
     }
 
     /// Wait for a fence value (blocking).
-    fn wait_fence(&self, value: u64) {
+    pub fn wait_fence(&self, value: u64) {
         unsafe { self.fence.SetEventOnCompletion(value, self.fence_event) }.ok();
         unsafe { WaitForSingleObject(self.fence_event, u32::MAX) };
     }
     
     /// Get the current completed fence value.
-    fn completed_fence(&self) -> u64 {
+    pub fn completed_fence(&self) -> u64 {
         unsafe { self.fence.GetCompletedValue() }
     }
 }
@@ -715,7 +716,7 @@ impl ReadbackRing {
         None
     }
 
-    fn signal_fence(&self, queue: &ID3D12CommandQueue) -> u64 {
+    pub fn signal_fence(&self, queue: &ID3D12CommandQueue) -> u64 {
         let value = self.fence_value.fetch_add(1, Ordering::AcqRel);
         unsafe { queue.Signal(&self.fence, value) }.ok();
         
@@ -729,12 +730,12 @@ impl ReadbackRing {
         value
     }
 
-    fn wait_fence(&self, value: u64) {
+    pub fn wait_fence(&self, value: u64) {
         unsafe { self.fence.SetEventOnCompletion(value, self.fence_event) }.ok();
         unsafe { WaitForSingleObject(self.fence_event, u32::MAX) };
     }
     
-    fn completed_fence(&self) -> u64 {
+    pub fn completed_fence(&self) -> u64 {
         unsafe { self.fence.GetCompletedValue() }
     }
 }
@@ -893,8 +894,8 @@ impl NativeMemory {
                 VirtualAlloc(
                     aligned_va as *mut _,
                     size as usize,
-                    MEM_RESERVE,
-                    PAGE_READWRITE,
+                    SYS_MEM_RESERVE,
+                    SYS_PAGE_READWRITE,
                 )
             };
             if ptr.is_null() {
@@ -920,7 +921,7 @@ impl NativeMemory {
                 VirtualAlloc(
                     aligned_va as *mut std::ffi::c_void,
                     size as usize,
-                    MEM_RESERVE | MEM_COMMIT,
+                    SYS_MEM_RESERVE | SYS_MEM_COMMIT,
                     protect,
                 )
             };
@@ -1922,7 +1923,7 @@ impl NativeMemory {
     ) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
         let mut info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
         unsafe {
-            self.device.as_ref().GetRaytracingAccelerationStructurePrebuildInfo(build_inputs, &mut info);
+            self.device.cast::<ID3D12Device5>()?.GetRaytracingAccelerationStructurePrebuildInfo(build_inputs, &mut info);
         }
         info
     }
