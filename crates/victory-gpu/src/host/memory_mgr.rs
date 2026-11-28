@@ -57,7 +57,7 @@ impl Default for MemoryBudget {
 }
 
 /// Memory pool type for different usage patterns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum MemoryPoolType {
     /// Static resources (textures, buffers that persist)
     Static,

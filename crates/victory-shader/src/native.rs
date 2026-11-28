@@ -136,7 +136,7 @@ const FSPX_RECORD: usize = 32;
 const MAX_UNPACKED: u64 = 16 << 20;
 
 /// Hardware shader stage a native program runs as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HwStage {
     Ls,
     Hs,

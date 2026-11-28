@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
 use crate::host::{host, Host};
 use crate::resource::{footprint, AllocationInfo};
@@ -348,7 +349,6 @@ impl GpuArena {
     fn heap_flags(&self) -> D3D12_HEAP_FLAGS {
         self.heap_flags
     }
-}
 
     fn allocate(&self, size: u64, alignment: u64) -> Option<u64> {
         let mut free = self.free_list.lock().unwrap();
@@ -451,7 +451,7 @@ impl UploadRing {
         }
 
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAGS(0))? };
-        let fence_event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None) };
+        let fence_event = unsafe { CreateEventW(None, false, false, None) };
 
         Ok(UploadRing {
             resource,
@@ -617,7 +617,7 @@ impl ReadbackRing {
         }
 
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAGS(0))? };
-        let fence_event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None) };
+        let fence_event = unsafe { CreateEventW(None, false, false, None) };
 
         Ok(ReadbackRing {
             resource,
