@@ -83,7 +83,7 @@ impl Drop for HostAllocation {
 impl Drop for NativeMemory {
     fn drop(&mut self) {
         // Close event handles
-        if !self.copy_fence_event.is_null() {
+        if !self.copy_fence_event.is_invalid() {
             unsafe {
                 windows::Win32::Foundation::CloseHandle(self.copy_fence_event);
             }
@@ -99,6 +99,8 @@ struct GpuResourceBinding {
     title_va: u64,
     /// Size in bytes.
     size: u64,
+    /// The D3D12 device.
+    device: Arc<ID3D12Device>,
     /// The D3D12 resource (DEFAULT heap for GPU access).
     resource: ID3D12Resource,
     /// GPU virtual address of the resource.
@@ -138,6 +140,7 @@ struct GpuResourceBinding {
 impl GpuResourceBinding {
     /// Create a new binding for a buffer resource.
     fn new_buffer(
+        device: Arc<ID3D12Device>,
         title_va: u64,
         size: u64,
         resource: ID3D12Resource,
@@ -147,6 +150,7 @@ impl GpuResourceBinding {
         Self {
             title_va,
             size,
+            device,
             resource,
             gpu_va,
             uav,
@@ -169,6 +173,7 @@ impl GpuResourceBinding {
 
     /// Create a new binding for a texture resource.
     fn new_texture(
+        device: Arc<ID3D12Device>,
         title_va: u64,
         size: u64,
         resource: ID3D12Resource,
@@ -181,6 +186,7 @@ impl GpuResourceBinding {
         Self {
             title_va,
             size,
+            device,
             resource,
             gpu_va,
             uav,
@@ -570,7 +576,7 @@ impl UploadRing {
 
 impl Drop for UploadRing {
     fn drop(&mut self) {
-        if !self.fence_event.is_null() {
+        if !self.fence_event.is_invalid() {
             unsafe {
                 windows::Win32::Foundation::CloseHandle(self.fence_event);
             }
@@ -728,7 +734,7 @@ impl ReadbackRing {
 
 impl Drop for ReadbackRing {
     fn drop(&mut self) {
-        if !self.fence_event.is_null() {
+        if !self.fence_event.is_invalid() {
             unsafe {
                 windows::Win32::Foundation::CloseHandle(self.fence_event);
             }
@@ -977,7 +983,7 @@ impl NativeMemory {
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, uav)?;
 
         let binding = Arc::new(GpuResourceBinding::new_buffer(
-            title_va, size, resource.clone(), gpu_va, uav
+            self.device.clone(), title_va, size, resource.clone(), gpu_va, uav
         ));
         // Store heap info for potential aliasing
         binding.heap_offset = offset;
@@ -1581,7 +1587,7 @@ impl NativeMemory {
         let (resource, gpu_va, offset, heap) = self.allocate_default_texture_resource(desc, uav)?;
 
         let binding = Arc::new(GpuResourceBinding::new_texture(
-            title_va, size, resource.clone(), gpu_va, uav, desc, offset, heap
+            self.device.clone(), title_va, size, resource.clone(), gpu_va, uav, desc, offset, heap
         ));
 
         // Track with memory manager (Phase 6 Hardware Optimization).
@@ -1779,7 +1785,7 @@ impl NativeMemory {
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
         let binding = Arc::new(GpuResourceBinding::new_buffer(
-            title_va, size, resource.clone(), gpu_va, uav
+            self.device.clone(), title_va, size, resource.clone(), gpu_va, uav
         ));
         binding.heap_offset = heap_offset;
         binding.heap = Some(heap.clone());
@@ -1833,7 +1839,7 @@ impl NativeMemory {
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
         let binding = Arc::new(GpuResourceBinding::new_texture(
-            title_va, size, resource.clone(), gpu_va, uav, desc, heap_offset, Some(heap.clone())
+            self.device.clone(), title_va, size, resource.clone(), gpu_va, uav, desc, heap_offset, Some(heap.clone())
         ));
 
         // Register as alias on the source binding
@@ -1859,7 +1865,7 @@ impl NativeMemory {
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, false)?;
 
         let binding = Arc::new(GpuResourceBinding::new_buffer(
-            title_va, size, resource.clone(), gpu_va, false
+            self.device.clone(), title_va, size, resource.clone(), gpu_va, false
         ));
         binding.heap_offset = offset;
         binding.heap = heap;
@@ -1885,7 +1891,7 @@ impl NativeMemory {
         let (resource, gpu_va, offset, heap) = self.allocate_default_resource(size, false)?;
 
         let binding = Arc::new(GpuResourceBinding::new_buffer(
-            title_va, size, resource.clone(), gpu_va, false
+            self.device.clone(), title_va, size, resource.clone(), gpu_va, false
         ));
         binding.heap_offset = offset;
         binding.heap = heap;

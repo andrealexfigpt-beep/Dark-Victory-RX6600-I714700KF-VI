@@ -77,7 +77,7 @@ mod safecopy;
 mod sampler;
 #[cfg(windows)]
 pub mod shader_cache;
-#[cfg(all(windows, feature = "native-memory"))]
+#[cfg(windows)]
 pub mod shader_perm;
 #[cfg(windows)]
 mod memory;
