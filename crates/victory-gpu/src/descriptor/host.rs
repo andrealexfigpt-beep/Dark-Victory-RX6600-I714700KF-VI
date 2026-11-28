@@ -1342,18 +1342,18 @@ fn view_home(
 
 #[cfg(not(all(windows, feature = "native-memory")))]
 fn view_home(
-    shadow: std::sync::Arc<crate::shadow::Shadow>,
+    shadow: crate::shadow::ShadowHandle,
     start: u64,
     len: u64,
     (stride, raw, format): (u32, bool, u32),
-) -> std::sync::Arc<crate::shadow::Shadow> {
+) -> crate::shadow::ShadowHandle {
     let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset(start)) else {
         return shadow;
     };
     if !view_bytes() {
         return shadow;
     }
-    crate::shadow::exact(start, len).unwrap_or(shadow)
+    crate::shadow::exact(start, len).map(ShadowHandle).unwrap_or(shadow)
 }
 
 /// For device-removed reports: what the slots of the title's view heap that
@@ -3552,7 +3552,7 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
 }
 
 #[cfg(not(all(windows, feature = "native-memory")))]
-pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
+pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
         return None;
@@ -3563,13 +3563,13 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::
         && address >= base
         && address - base < width.max(1)
         && let Some(shadow) = {
-            crate::shadow::find(base, width).map(Into::into)
+            crate::shadow::find(base, width).map(ShadowHandle)
         }
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
     let shadow = {
-        crate::shadow::find(address, len).map(Into::into)
+        crate::shadow::find(address, len).map(ShadowHandle)
     }?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }

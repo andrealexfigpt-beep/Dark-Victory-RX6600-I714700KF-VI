@@ -509,26 +509,131 @@ fn heap_spread() -> bool {
 
 /// The host copy and range the buffer view of each of a heap's slots reads
 /// ([`State::heap_buffers`]), by slot.
+#[cfg(all(windows, feature = "native-memory"))]
+type HeapView = (crate::shadow::ShadowHandle, u64, u64);
+#[cfg(not(all(windows, feature = "native-memory")))]
 type HeapView<T> = (std::sync::Arc<T>, u64, u64);
 
+#[cfg(all(windows, feature = "native-memory"))]
+type HeapSpan = (crate::shadow::ShadowHandle, u64, u64);
+
+#[cfg(not(all(windows, feature = "native-memory")))]
 struct HeapSpan<T> {
     copy: std::sync::Arc<T>,
     starts: std::collections::BTreeSet<(u64, u32)>,
     ends: std::collections::BTreeSet<(u64, u32)>,
 }
 
+#[cfg(all(windows, feature = "native-memory"))]
+pub(crate) struct HeapRanges {
+    slots: Vec<Option<HeapView>>,
+    copies: crate::host::ByCopy<HeapSpan>,
+    views: usize,
+}
+
+#[cfg(not(all(windows, feature = "native-memory")))]
 pub(crate) struct HeapRanges<T> {
     slots: Vec<Option<HeapView<T>>>,
     copies: crate::host::ByCopy<HeapSpan<T>>,
     views: usize,
 }
 
+#[cfg(all(windows, feature = "native-memory"))]
+impl Default for HeapRanges {
+    fn default() -> Self {
+        Self { slots: Vec::new(), copies: Default::default(), views: 0 }
+    }
+}
+
+#[cfg(not(all(windows, feature = "native-memory")))]
 impl<T> Default for HeapRanges<T> {
     fn default() -> Self {
         Self { slots: Vec::new(), copies: Default::default(), views: 0 }
     }
 }
 
+#[cfg(all(windows, feature = "native-memory"))]
+impl HeapRanges {
+    fn set(&mut self, slot: u32, range: Option<HeapView>) {
+        let index = slot as usize;
+        if range.is_none() && index >= self.slots.len() {
+            return;
+        }
+        if index >= self.slots.len() {
+            self.slots.resize_with(index + 1, || None);
+        }
+        let key = |copy: &crate::shadow::ShadowHandle| std::sync::Arc::as_ptr(&match copy {
+            crate::shadow::ShadowHandle::Legacy(arc) => arc.clone(),
+            crate::shadow::ShadowHandle::Native(arc) => arc.clone(),
+        }) as usize;
+        let old = &mut self.slots[index];
+        if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
+            && std::sync::Arc::ptr_eq(&match a {
+                crate::shadow::ShadowHandle::Legacy(arc) => arc.clone(),
+                crate::shadow::ShadowHandle::Native(arc) => arc.clone(),
+            }, &match b {
+                crate::shadow::ShadowHandle::Legacy(arc) => arc.clone(),
+                crate::shadow::ShadowHandle::Native(arc) => arc.clone(),
+            }) && from == start && to == end
+        {
+            return;
+        }
+        if let Some((copy, from, to)) = old.take() {
+            let id = key(&copy);
+            let span = self.copies.get_mut(&id).expect("slot's copy is indexed");
+            span.starts.remove(&(from, slot));
+            span.ends.remove(&(to, slot));
+            if span.starts.is_empty() {
+                self.copies.remove(&id);
+            }
+            self.views -= 1;
+        }
+        if let Some((copy, from, to)) = &range {
+            let span = self.copies.entry(key(copy)).or_insert_with(|| HeapSpan {
+                copy: copy.clone(), starts: Default::default(), ends: Default::default(),
+            });
+            span.starts.insert((*from, slot));
+            span.ends.insert((*to, slot));
+            self.views += 1;
+        }
+        *old = range;
+    }
+
+    /// Forget slots absent from this partition's revalidation, retaining
+    /// known ranges until their slot has actually been looked at again.
+    fn prune_part(&mut self, part: u32, parts: u32, present: &[u32]) {
+        let mut present = present.iter().copied().peekable();
+        for index in (part as usize..self.slots.len()).step_by(parts as usize) {
+            let slot = index as u32;
+            while present.peek().is_some_and(|&next| next < slot) {
+                present.next();
+            }
+            if self.slots[index].is_some() && present.peek() != Some(&slot) {
+                self.set(slot, None);
+            }
+        }
+    }
+
+    fn spans(&self) -> impl Iterator<Item = (&crate::shadow::ShadowHandle, u64, u64)> {
+        self.copies.values().filter_map(|span| {
+            Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
+        })
+    }
+
+    #[cfg(test)]
+    fn ranges(&self) -> impl Iterator<Item = &HeapView> {
+        self.slots.iter().flatten()
+    }
+}
+
+#[cfg(not(all(windows, feature = "native-memory")))]
+impl<T> Default for HeapRanges<T> {
+    fn default() -> Self {
+        Self { slots: Vec::new(), copies: Default::default(), views: 0 }
+    }
+}
+
+#[cfg(not(all(windows, feature = "native-memory")))]
 impl<T> HeapRanges<T> {
     fn set(&mut self, slot: u32, range: Option<HeapView<T>>) {
         let index = slot as usize;

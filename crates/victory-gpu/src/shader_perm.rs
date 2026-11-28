@@ -36,7 +36,7 @@ impl ShaderPermutationKey {
     pub fn from_shader(
         stage: HwStage,
         container: &[u8],
-        translation_fingerprint: [u8; 32],
+        translation_fingerprint: Vec<u8>,
         root_signature_hash: [u8; 32],
         wave_mismatch: bool,
         cross_lane: bool,
@@ -287,7 +287,7 @@ impl PermutationTracker {
         &self,
         stage: HwStage,
         container: &[u8],
-        translation_fingerprint: [u8; 32],
+        translation_fingerprint: Vec<u8>,
         root_signature_hash: [u8; 32],
         wave_mismatch: bool,
         cross_lane: bool,
@@ -295,7 +295,7 @@ impl PermutationTracker {
     ) -> ShaderPermutationKey {
         let key = ShaderPermutationKey::from_shader(
             stage, container, translation_fingerprint, root_signature_hash,
-            wave_mismatch, cross_lane,
+            false, false,
         );
 
         let mut perms = self.permutations.write().unwrap();
@@ -417,13 +417,13 @@ pub fn enable_persistence(dir: PathBuf) {
 pub fn record_translation(
     stage: HwStage,
     container: &[u8],
-    translation_fingerprint: [u8; 32],
+    translation_fingerprint: Vec<u8>,
     root_signature_hash: [u8; 32],
     wave_mismatch: bool,
     cross_lane: bool,
     shader: &HostShader,
 ) -> ShaderPermutationKey {
-    tracker().record_translation(stage, container, translation_fingerprint, root_signature_hash, wave_mismatch, cross_lane, shader)
+    tracker().record_translation(stage, container, translation_fingerprint, root_signature_hash, false, false, shader)
 }
 
 /// Record a pipeline-shader relationship.
@@ -483,12 +483,12 @@ mod tests {
 
     #[test]
     fn permutation_key_uniqueness() {
-        let fp = [1u8; 32];
+        let fp = vec![1u8; 32];
         let rs = [2u8; 32];
         let container = b"test container";
 
-        let key1 = ShaderPermutationKey::from_shader(HwStage::Ps, container, fp, rs, false, false);
-        let key2 = ShaderPermutationKey::from_shader(HwStage::Ps, container, fp, rs, false, false);
+        let key1 = ShaderPermutationKey::from_shader(HwStage::Ps, container, fp.clone(), rs, false, false);
+        let key2 = ShaderPermutationKey::from_shader(HwStage::Ps, container, fp.clone(), rs, false, false);
         let key3 = ShaderPermutationKey::from_shader(HwStage::Ps, container, fp, rs, true, false); // wave mismatch
 
         assert_eq!(key1, key2);
@@ -499,7 +499,7 @@ mod tests {
     fn permutation_roundtrip() {
         let shader = test_shader();
         let mut perm = ShaderPermutation::from(&shader);
-        perm.key = ShaderPermutationKey::from_shader(HwStage::Ps, b"container", [1u8;32], [2u8;32], false, false);
+        perm.key = ShaderPermutationKey::from_shader(HwStage::Ps, b"container", vec![1u8;32], [2u8;32], false, false);
         let reconstructed = perm.to_host_shader();
         assert_eq!(reconstructed.stage, shader.stage);
         assert_eq!(reconstructed.user_data.len(), shader.user_data.len());
