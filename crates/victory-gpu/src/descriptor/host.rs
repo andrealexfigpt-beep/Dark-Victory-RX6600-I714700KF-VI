@@ -3737,11 +3737,11 @@ fn buffer_srv(
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(address, len)
             } else {
-                crate::shadow::find(address, len).map(Into::into)
+                crate::shadow::find(address, len).map(ShadowHandle::Legacy)
             }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(Into::into)
+        crate::shadow::find(address, len).map(ShadowHandle)
     };
     let Some(mut shadow) = shadow else {
         return None;
@@ -3858,11 +3858,11 @@ fn buffer_uav(
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(address, len)
             } else {
-                crate::shadow::find(address, len).map(Into::into)
+                crate::shadow::find(address, len).map(ShadowHandle::Legacy)
             }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(Into::into)
+        crate::shadow::find(address, len).map(ShadowHandle)
     };
     let Some(mut shadow) = shadow else {
         return None;

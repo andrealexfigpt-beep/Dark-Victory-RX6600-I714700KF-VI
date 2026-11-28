@@ -1461,10 +1461,10 @@ impl State {
             let shadow: crate::shadow::ShadowHandle = if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_any_handle(v.address, u64::from(v.size))
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
             
             let Some(shadow) = shadow else {
                 continue;
@@ -1488,10 +1488,10 @@ impl State {
             let shadow: crate::shadow::ShadowHandle = if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_any_handle(v.address, u64::from(v.size))
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
+            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
             
             let Some(shadow) = shadow else {
                 return false;
@@ -1869,10 +1869,11 @@ impl State {
             return false;
         };
         let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
+        let addr = address.unwrap_or(0);
         let (index, shadow) = match self.root_uav_slots.get(&key) {
             Some((index, shadow)) => (*index, shadow.clone()),
             None => {
-                let shadow = address.and_then(|a| crate::shadow::find_handle(a, 0));
+                let shadow = crate::shadow::find_handle(addr, 0);
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
@@ -1880,14 +1881,14 @@ impl State {
                 if let Some(s) = &shadow {
                     // SAFETY: a live buffer.
                     let base = unsafe { s.resource().GetGPUVirtualAddress() };
-                    let offset = s.gpu(*address.unwrap()) - base;
+                    let offset = s.gpu(addr) - base;
                     // Raw views start on 16 bytes: from the 16 bytes
                     // below, and the shader adds the rest to its offsets
                     // (`victory_shader::emit::USER_VIEW_BIAS`). (An address
                     // not on 16 bytes got a null view at first: the
                     // builder's counters are at such addresses.)
                     let bias = offset & 15;
-                    host.raw_uav_at(index, s.resource(), offset - bias, s.left(*address.unwrap()).min(limit) + bias);
+                    host.raw_uav_at(index, s.resource(), offset - bias, s.left(addr).min(limit) + bias);
                 }
                 if shadow.is_none() {
                     host.null_raw_uav_at(index);
@@ -1943,16 +1944,17 @@ impl State {
         let (index, shadow) = match self.root_srv_slots.get(&key) {
             Some((index, shadow)) => (*index, shadow.clone()),
             None => {
-                let shadow = address.and_then(|a| {
-            #[cfg(all(windows, feature = "native-memory"))]
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(a, 1)
-            } else {
-                crate::shadow::find(a, 1).map(Into::into)
-            }
-            #[cfg(not(all(windows, feature = "native-memory")))]
-            crate::shadow::find(a, 1).map(Into::into)
-        });
+                let addr = address.unwrap_or(0);
+                let shadow = {
+                    #[cfg(all(windows, feature = "native-memory"))]
+                    if crate::memory_backend::is_native_backend_active() {
+                        crate::shadow::find_handle(addr, 1)
+                    } else {
+                        crate::shadow::find(addr, 1).map(Into::into)
+                    }
+                    #[cfg(not(all(windows, feature = "native-memory")))]
+                    crate::shadow::find(addr, 1).map(Into::into)
+                };
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
@@ -1963,19 +1965,19 @@ impl State {
                     Some(s) => {
                         // SAFETY: a live buffer.
                         let base = unsafe { s.resource().GetGPUVirtualAddress() };
-                        let offset = s.gpu(*a) - base;
+                        let offset = s.gpu(addr) - base;
                         if biased {
                             // From the 16 bytes below; the shader adds the
                             // rest (`victory_shader::emit::USER_VIEW_BIAS`).
                             let bias = offset & 15;
-                            host.raw_at(index, s.resource(), offset - bias, s.left(*a) + bias);
+                            host.raw_at(index, s.resource(), offset - bias, s.left(addr) + bias);
                         } else if offset.is_multiple_of(16) {
-                            host.raw_at(index, s.resource(), offset, s.left(*a));
+                            host.raw_at(index, s.resource(), offset, s.left(addr));
                         } else {
                             // Raw views start on 16 bytes; one from the
                             // aligned start would shift every read.
                             once!(
-                                address = format_args!("{a:#x}"),
+                                address = format_args!("{addr:#x}"),
                                 "a root SRV not on 16 bytes reads zeros"
                             );
                         }

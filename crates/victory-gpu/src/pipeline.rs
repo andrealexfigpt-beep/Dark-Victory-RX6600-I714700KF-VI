@@ -274,16 +274,9 @@ pub(crate) fn compute_root_signature_hash(host: &victory_shader::emit::HostShade
     }
     h.update(&(host.samplers.len() as u32).to_le_bytes());
     for s in &host.samplers {
-        h.update(&s.filter.to_le_bytes());
-        h.update(&s.address[0].to_le_bytes());
-        h.update(&s.address[1].to_le_bytes());
-        h.update(&s.address[2].to_le_bytes());
-        h.update(&s.mip_lod_bias.to_le_bytes());
-        h.update(&s.max_anisotropy.to_le_bytes());
-        h.update(&s.comparison.to_le_bytes());
-        h.update(&s.border.to_le_bytes());
-        h.update(&s.min_lod.to_le_bytes());
-        h.update(&s.max_lod.to_le_bytes());
+        for &word in s {
+            h.update(&word.to_le_bytes());
+        }
     }
     h.update(&(host.static_samplers.len() as u32).to_le_bytes());
     for s in &host.static_samplers {
