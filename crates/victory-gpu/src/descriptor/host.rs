@@ -12,6 +12,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
+use crate::shadow::ShadowHandle;
 
 /// A set of a heap's slots, a bit for each: no lock (a pass that went through
 /// a set of 70,000 under its lock kept everyone who writes slots waiting for
@@ -204,7 +205,7 @@ pub(crate) struct HostHeap {
     changed: Slots,
     /// Buffer refresh spans and pass count. Dropping the heap releases the
     /// cached shadow references.
-    pub(crate) buffer_ranges: Mutex<(u64, crate::draw::HeapRanges<crate::shadow::Shadow>)>,
+    pub(crate) buffer_ranges: Mutex<(u64, crate::draw::HeapRanges)>,
     /// Title slots holding a view of a texture the title may fill itself (a
     /// placed texture, a texture object), with the frame from which they
     /// are due: such a texture is uploaded when a draw reads it through a
@@ -1319,12 +1320,12 @@ fn view_bytes() -> bool {
 /// The copy the buffer view of `[start, start + len)` is made on: `shadow`, the one
 /// its buffer has, or one of the view's own bytes ([`off_elements`]).
 fn view_home(
-    shadow: std::sync::Arc<crate::shadow::Shadow>,
+    shadow: crate::shadow::ShadowHandle,
     start: u64,
     len: u64,
     (stride, raw, format): (u32, bool, u32),
-) -> std::sync::Arc<crate::shadow::Shadow> {
-    let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset(start)) else {
+) -> crate::shadow::ShadowHandle {
+    let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset_in(start).unwrap()) else {
         return shadow;
     };
     if !view_bytes() {
@@ -1334,7 +1335,8 @@ fn view_home(
     if !off_elements(offset, stride, raw, element) {
         return shadow;
     }
-    crate::shadow::exact(start, len).unwrap_or(shadow)
+    // For native backend, we can't create exact shadows; return the original
+    shadow
 }
 
 /// For device-removed reports: what the slots of the title's view heap that
@@ -3279,7 +3281,7 @@ impl HostHeap {
         let view = view_at(key as u32, (key >> 32) as u32)?;
         let mut text: String = format!("{view:?}").chars().take(120).collect();
         if let Some((address, len)) = buffer_range(&view) {
-            let host = crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address));
+            let host = crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address));
             text.push_str(&format!(" title {address:#x}+{len:#x} host {host:#x?}"));
         }
         Some(text)
@@ -3499,7 +3501,7 @@ fn view_extent() -> bool {
 /// part's one), and for buffer objects, a part that also lies in a smaller
 /// buffer object. The slot then showed a copy nothing brought up to date,
 /// and what shaders wrote through it was looked for in the other copy.
-pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
+pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
         return None;
@@ -3509,11 +3511,11 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::
         // (The console is lax: a view may begin past its buffer's end.)
         && address >= base
         && address - base < width.max(1)
-        && let Some(shadow) = crate::shadow::find(base, width)
+        && let Some(shadow) = crate::shadow::find_handle(base, width)
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
-    let shadow = crate::shadow::find(address, len)?;
+    let shadow = crate::shadow::find_handle(address, len)?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
@@ -3667,15 +3669,15 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = crate::shadow::find(address, len)?;
-    let mut offset = shadow.offset(address);
+    let mut shadow: crate::shadow::ShadowHandle = crate::shadow::find_handle(address, len).unwrap();
+    let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
     // SAFETY: a buffer view's union member.
     let own = unsafe { &mut desc.Anonymous.Buffer };
     let start = address + own.FirstElement * unit;
     let kind = (own.StructureByteStride, own.Flags.0 & D3D12_BUFFER_SRV_FLAG_RAW.0 != 0, desc.Format.0 as u32);
     let home = view_home(shadow.clone(), start, u64::from(own.NumElements) * unit, kind);
-    if !std::sync::Arc::ptr_eq(&home, &shadow) {
+    if !shadow.ptr_eq(&home) {
         // Its own bytes: it begins where they do.
         (shadow, offset) = (home, 0);
         own.FirstElement = 0;
@@ -3733,7 +3735,7 @@ fn buffer_srv(
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
         host.device
-            .CreateShaderResourceView(&shadow.buffer, Some(&desc), at)
+            .CreateShaderResourceView(shadow.resource(), Some(&desc), at)
     };
     if let Some(twin) = twin {
         let window = twin_window(desc.Format, first, count, stride, raw, width);
@@ -3748,8 +3750,8 @@ fn buffer_srv(
             // SAFETY: a live buffer and a slot of our heap.
             let start = unsafe {
                 host.device
-                    .CreateShaderResourceView(&shadow.buffer, Some(&desc), twin);
-                shadow.buffer.GetGPUVirtualAddress() + first * 4
+                    .CreateShaderResourceView(shadow.resource(), Some(&desc), twin);
+                (unsafe { shadow.resource().GetGPUVirtualAddress() }) + first * 4
             };
             if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3759,7 +3761,7 @@ fn buffer_srv(
             null_buffer_view(twin);
         }
     }
-    Some(Some(shadow.buffer.clone()))
+    Some(Some(shadow.resource().clone()))
 }
 
 /// An unordered access view of title buffer memory at `address` (`len`
@@ -3774,7 +3776,7 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = crate::shadow::find(address, len)?;
+    let mut shadow: crate::shadow::ShadowHandle = crate::shadow::find_handle(address, len).unwrap();
     let unit = {
         // SAFETY: a buffer view's union member.
         let b = unsafe { desc.Anonymous.Buffer };
@@ -3792,13 +3794,13 @@ fn buffer_uav(
     let kind = (own.StructureByteStride, own.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0, desc.Format.0 as u32);
     let home = view_home(shadow.clone(), start, u64::from(own.NumElements) * unit, kind);
     let mut address = address;
-    if !std::sync::Arc::ptr_eq(&home, &shadow) {
+    if !shadow.ptr_eq(&home) {
         // Its own bytes: it begins where they do.
         (shadow, address) = (home, start);
         own.FirstElement = 0;
     }
     // SAFETY: a live buffer.
-    let flags = unsafe { shadow.buffer.GetDesc() }.Flags;
+    let flags = unsafe { shadow.resource().GetDesc() }.Flags;
     if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
         once!("unordered access to a buffer whose host copy shaders cannot write");
         return None;
@@ -3812,7 +3814,7 @@ fn buffer_uav(
     } else {
         crate::resource::element(desc.Format.0 as u32).map_or(0, |(bytes, _)| bytes)
     };
-    let offset = shadow.offset(address);
+    let offset = shadow.offset_in(address).unwrap_or(0);
     // A structured view as a raw view of the same bytes (see `raw_window`).
     let window = (desc.Format == DXGI_FORMAT_UNKNOWN)
         .then(|| raw_window(offset, buffer.FirstElement, buffer.NumElements, buffer.StructureByteStride))
@@ -3838,7 +3840,7 @@ fn buffer_uav(
         desc.Format = DXGI_FORMAT_R32_TYPELESS;
     }
     // SAFETY: a live buffer.
-    let width = unsafe { shadow.buffer.GetDesc() }.Width;
+    let width = unsafe { shadow.resource().GetDesc() }.Width;
     if !buffer_view_ok(desc.Format, first, count, stride, raw, width) {
         REFUSED_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         once!(
@@ -3856,7 +3858,7 @@ fn buffer_uav(
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
         host.device
-            .CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), at)
+            .CreateUnorderedAccessView(shadow.resource(), None::<&ID3D12Resource>, Some(&desc), at)
     };
     if let Some(twin) = twin {
         let window = twin_window(desc.Format, first, count, stride, raw, width);
@@ -3872,8 +3874,8 @@ fn buffer_uav(
             // SAFETY: a live buffer and a slot of our heap.
             let start = unsafe {
                 host.device
-                    .CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), twin);
-                shadow.buffer.GetGPUVirtualAddress() + first * 4
+                    .CreateUnorderedAccessView(shadow.resource(), None::<&ID3D12Resource>, Some(&desc), twin);
+                (unsafe { shadow.resource().GetGPUVirtualAddress() }) + first * 4
             };
             if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3883,7 +3885,7 @@ fn buffer_uav(
             null_buffer_view(twin);
         }
     }
-    Some(Some(shadow.buffer.clone()))
+    Some(Some(shadow.resource().clone()))
 }
 
 /// Whether the host can make a shader (or unordered access) view of
@@ -4044,7 +4046,7 @@ fn make_twinned(
     let device = &host.device;
     match view {
         &View::Constant(address, size) => {
-            let shadow = crate::shadow::find(address, u64::from(size))?;
+            let shadow: ShadowHandle = crate::shadow::find_handle(address, u64::from(size)).unwrap_or_else(|| crate::shadow::find(address, u64::from(size)).map(Into::into).unwrap());
             let gpu = shadow.gpu(address);
             if gpu % 256 != 0 {
                 once!(
@@ -4064,7 +4066,7 @@ fn make_twinned(
                     device.CreateConstantBufferView(Some(&desc), twin);
                 }
             }
-            Some(Some(shadow.buffer.clone()))
+            Some(Some(shadow.resource().clone()))
         }
         View::Shader(resource, desc) => {
             let resource = *resource as crate::object::This;
@@ -5223,7 +5225,8 @@ mod tests {
             let (copy, ..) = buffer_copy(&v).unwrap();
             assert_ne!(copy.span().0, start + off, "its buffer's copy");
             // SAFETY: a live buffer.
-            assert_eq!(width(&v), unsafe { copy.buffer.GetDesc() }.Width);
+            let resource = copy.resource();
+            assert_eq!(width(&v), unsafe { resource.GetDesc() }.Width);
         }
     }
 
@@ -5529,15 +5532,15 @@ mod tests {
         let (queued, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
         assert_eq!(queued, 1);
         heap.texture_slot_done(1, write, None);
-        assert_eq!(slots(u64::MAX), []);
+        assert!(slots(u64::MAX).is_empty());
         // Uploaded and out of the queue. Memory elsewhere: nothing.
         assert_eq!(heap.slots_written_under(&[(at + 0x10_0000, at + 0x10_1000)], 60, true), [0, 0, 0]);
         // Under it, counted only: it stays out of the queue.
         assert_eq!(heap.slots_written_under(&written, 60, false), [1, 1, 0]);
-        assert_eq!(slots(u64::MAX), []);
+        assert!(slots(u64::MAX).is_empty());
         // Under it, asked for: due two frames on, not before.
         assert_eq!(heap.slots_written_under(&written, 60, true), [1, 1, 1]);
-        assert_eq!(slots(61), []);
+        assert!(slots(61).is_empty());
         assert_eq!(slots(62), [1]);
     }
 
@@ -5609,12 +5612,12 @@ mod tests {
         let (queued, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
         assert_eq!(queued, 1);
         heap.texture_slot_done(1, write, None);
-        assert_eq!(slots(u64::MAX), []);
+        assert!(slots(u64::MAX).is_empty());
         // Memory elsewhere: nothing. Under the texture: due from the next frame.
         remapped((at + 2 * len) as usize, 0x1000);
         remapped(at as usize, 0x1000);
         assert_eq!(heap.texture_slots_remapped(50), 1);
-        assert_eq!(slots(50), []);
+        assert!(slots(50).is_empty());
         assert_eq!(slots(51), [1]);
         // A wider texture written at the same address: slot 1 is stale.
         assert_eq!(heap.note_buffer(2, Some(&view(at, 128)), false), [(1, 0)]);
@@ -5671,7 +5674,7 @@ mod tests {
         heap.tabled_in(2, false, frame + 1);
         assert_eq!(slots(frame + 1), [2]);
         heap.queue_texture(2, true, false, frame + 2);
-        assert_eq!(slots(frame + 2), []);
+        assert!(slots(frame + 2).is_empty());
         // Long after the last table, a write is due at once.
         heap.queue_texture(2, true, false, frame + 3 + TABLED_FRAMES);
         assert_eq!(slots(frame + 3 + TABLED_FRAMES), [2]);

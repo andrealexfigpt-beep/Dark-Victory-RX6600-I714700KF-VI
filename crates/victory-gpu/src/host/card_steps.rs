@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::shadow::Shadow;
+use crate::shadow::ShadowHandle;
 
 /// The stage (`VICTORY_CARD_STEPS`; off by default): `1` constant buffers
 /// of descriptor tables (`Step::Fill` with a slot of its own), `2` the
@@ -128,7 +128,7 @@ pub(super) enum FillTo {
 /// (`None`: none, the bytes reach title memory when the flight lands), from,
 /// to, and whether it is the destination of a copy done here.
 pub(super) struct Writer {
-    shadow: Option<Arc<Shadow>>,
+    shadow: Option<crate::shadow::ShadowHandle>,
     from: usize,
     to: usize,
     copy: bool,
@@ -199,7 +199,7 @@ pub(super) fn copied_read(copies: &[Writer], runs: &[&HostList]) -> bool {
         list.deferred().copies.iter().any(|step| match step {
             Step::Refresh(shadow, at, len) => copies
                 .iter()
-                .any(|w| w.from < *at + *len && *at < w.to && w.shadow.as_ref().is_none_or(|s| !Arc::ptr_eq(s, shadow))),
+                .any(|w| w.from < *at + *len && *at < w.to && w.shadow.as_ref().is_none_or(|s| !s.ptr_eq(shadow))),
             Step::Host(_, (from, to)) => copies.iter().any(|w| w.from < *to && *from < w.to),
             _ => false,
         })
@@ -390,18 +390,19 @@ fn elsewhere(does: &[Does], shadow: usize, from: usize, to: usize) -> bool {
 /// The host copy that holds `[from, to)` on the card once what `writers`
 /// write is there: the one they all write it through, or without any the
 /// one shaders would be given.
-fn holder(writers: &[Writer], from: usize, to: usize) -> Result<Arc<Shadow>, &'static str> {
-    let mut found: Option<&Arc<Shadow>> = None;
+
+fn holder(writers: &[Writer], from: usize, to: usize) -> Result<crate::shadow::ShadowHandle, &'static str> {
+    let mut found: Option<&crate::shadow::ShadowHandle> = None;
     for w in writers.iter().filter(|w| meet((w.from, w.to), (from, to))) {
         match (&w.shadow, found) {
             (None, _) => return Err("a read-back or a value behind a flight is written there"),
-            (Some(s), Some(f)) if !Arc::ptr_eq(s, f) => return Err("flights write it through two host copies"),
+            (Some(s), Some(f)) if !s.ptr_eq(f) => return Err("flights write it through two host copies"),
             (Some(s), _) => found = Some(s),
         }
     }
     let shadow = match found {
         Some(s) => s.clone(),
-        None => crate::shadow::find(from as u64, (to - from) as u64).ok_or("no host copy of it")?,
+        None => return Err("no host copy of it"),
     };
     let (start, len) = shadow.span();
     if shadow.in_place() || (from as u64) < start || to as u64 > start + len {
@@ -442,7 +443,7 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
                 }
                 &Step::Host(_, (from, to)) if from < to => Does::Read { from, to, asked: false },
                 Step::Refresh(shadow, at, len) => Does::Refresh {
-                    shadow: Arc::as_ptr(shadow) as usize,
+                    shadow: shadow.as_ptr(),
                     from: *at,
                     to: *at + *len,
                 },
@@ -512,9 +513,8 @@ fn fill_to(runs: &[&HostList], step: (usize, usize)) -> Option<FillTo> {
     }
 }
 
-/// A step done on the card.
 struct Op {
-    from: (Arc<Shadow>, usize),
+    from: (ShadowHandle, usize),
     len: usize,
     /// Its place in the buffer between.
     at: u64,
@@ -524,7 +524,7 @@ struct Op {
 
 enum To {
     /// A host copy, and the title address.
-    Copy(Arc<Shadow>, usize),
+    Copy(ShadowHandle, usize),
     /// A descriptor slot (title heap, slot).
     Slot(usize, u32),
     /// A buffer's beginning.
@@ -615,7 +615,7 @@ static DONE: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::Ato
 pub(super) struct Taken {
     own: Own,
     steps: std::collections::HashSet<(usize, usize), std::hash::BuildHasherDefault<AddressHash>>,
-    copied: Vec<(Arc<Shadow>, usize, usize)>,
+    copied: Vec<(ShadowHandle, usize, usize)>,
 }
 
 impl Taken {
@@ -703,7 +703,7 @@ impl Host {
         let mut places: HashMap<(usize, usize, usize, u32), u64> = HashMap::default();
         // Some 2,800 fills a frame, of a few hundred places: what holds each
         // is looked for once, as long as no copy is added to the writers.
-        let mut held: HashMap<(usize, usize), Arc<Shadow>> = HashMap::default();
+        let mut held: HashMap<(usize, usize), ShadowHandle> = HashMap::default();
         let mut room = HashMap::default();
         let mut end = 0u64;
         for &(i, level) in &chosen {
@@ -724,7 +724,7 @@ impl Host {
                     from
                 }
             };
-            let place = (Arc::as_ptr(&from) as usize, src, len, level);
+            let place = (from.as_ptr(), src, len, level);
             let at = match places.get(&place) {
                 Some(&at) => at,
                 None => {
@@ -743,7 +743,7 @@ impl Host {
             let to = match does[i] {
                 Does::Copy { .. } => {
                     let to = holder(&writers, dst, dst + len)?;
-                    if elsewhere(&does, Arc::as_ptr(&to) as usize, dst, dst + len) {
+                    if elsewhere(&does, to.as_ptr(), dst, dst + len) {
                         return Err("another host copy of what it writes is read");
                     }
                     if !mapped(dst, dst + len, &mut room) {
@@ -782,14 +782,14 @@ impl Host {
         // the title's. (One step for each host copy, over all that is read of
         // it: a flush brings a copy up to date from the first range asked for
         // to the last, whatever the steps.)
-        let mut spans: ByCopy<(Arc<Shadow>, usize, usize)> = ByCopy::default();
+        let mut spans: ByCopy<(ShadowHandle, usize, usize)> = ByCopy::default();
         for op in &ops {
             let to = match &op.to {
                 To::Copy(to, dst) => Some((to, *dst)),
                 _ => None,
             };
             for (shadow, at) in std::iter::once((&op.from.0, op.from.1)).chain(to) {
-                let span = spans.entry(Arc::as_ptr(shadow) as usize).or_insert_with(|| (shadow.clone(), at, at + op.len));
+                let span = spans.entry(shadow.as_ptr()).or_insert_with(|| (shadow.clone(), at, at + op.len));
                 (span.1, span.2) = (span.1.min(at), span.2.max(at + op.len));
             }
         }
@@ -811,13 +811,13 @@ impl Host {
             let mut writes = Vec::new();
             for op in ops.iter().filter(|op| op.level == level) {
                 let len = op.len as u64;
-                let read = (&op.from.0.buffer, op.from.0.offset(op.from.1 as u64), op.at, len);
+                let read = (op.from.0.resource(), op.from.0.offset(op.from.1 as u64), op.at, len);
                 // (Each place once.)
-                if places.remove(&(Arc::as_ptr(&op.from.0) as usize, op.from.1, op.len, level)).is_some() {
+                if places.remove(&(op.from.0.as_ptr(), op.from.1, op.len, level)).is_some() {
                     reads.push(read);
                 }
                 match &op.to {
-                    To::Copy(to, dst) => writes.push((&to.buffer, to.offset(*dst as u64), op.at, len)),
+                    To::Copy(to, dst) => writes.push((to.resource(), to.offset(*dst as u64), op.at, len)),
                     To::Buffer(buffer) => writes.push((buffer, 0, op.at, len)),
                     To::Slot(..) => {}
                 }

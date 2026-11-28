@@ -105,6 +105,37 @@ enum Command {
         #[arg(long)]
         jobs: Option<usize>,
     },
+    /// Precompile shaders ahead of time and export a versioned permutation
+    /// manifest for offline compilation and cache warming. Validates the
+    /// cache version and translation fingerprint before writing.
+    /// Precompile shaders ahead of time and export a versioned permutation
+    /// manifest for offline compilation and cache warming. Validates the
+    /// cache version and translation fingerprint before writing.
+    #[cfg(windows)]
+    Precompile {
+        paths: Vec<PathBuf>,
+        /// Worker threads (default: every logical core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Output path for the permutation manifest (JSON).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+    /// Precompile known pipeline states into the persistent pipeline library
+    /// cache before gameplay. Validates adapter, driver, translator version
+    /// and root signature compatibility. Preserves runtime fallback.
+    #[cfg(windows)]
+    PsoPrecompile {
+        /// Path to a permutation manifest (JSON) produced by `precompile`.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Worker threads (default: every logical core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Maximum pipelines to precompile (bounds RAM/VRAM).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Make the host pipelines of every pipeline the title ever created
     /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
     /// driver's cache on disk has them before a run needs one: once per change
@@ -208,12 +239,24 @@ fn main() -> Result<()> {
             if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
                 victory_shader::emit::set_host_max_wave(n);
             }
+            #[cfg(windows)]
             if let Some(file) = warm {
                 return translate::warm(paths, &file, jobs);
             }
+            #[cfg(not(windows))]
+            if warm.is_some() {
+                return Err(anyhow::anyhow!("--warm requires Windows"));
+            }
             translate::run(paths, validate, pipelines, list, jobs)
         }
+        #[cfg(windows)]
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        #[cfg(not(windows))]
+        Command::Shaders { .. } => Err(anyhow::anyhow!("shaders requires Windows")),
+        #[cfg(windows)]
+        Command::Precompile { paths, jobs, manifest } => translate::precompile_manifest(paths, jobs, manifest),
+        #[cfg(windows)]
+        Command::PsoPrecompile { manifest, jobs, limit } => translate::pso_precompile(manifest, jobs, limit),
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {

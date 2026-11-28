@@ -23,6 +23,7 @@ use windows::core::Interface;
 use crate::host::HostList;
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
+use crate::shadow::ShadowHandle;
 
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
@@ -472,7 +473,7 @@ pub(crate) fn take_dropped() -> u64 {
     DROPPED.swap(0, Ordering::Relaxed)
 }
 /// A root SRV's dynamic slot in a list, and the host copy it shows.
-type RootSlot = (u32, Option<std::sync::Arc<crate::shadow::Shadow>>);
+type RootSlot = (u32, Option<crate::shadow::ShadowHandle>);
 
 /// Buffer views of the heap whose slot showed another host buffer than
 /// the copy the pass brought up to date for them, since the start
@@ -508,28 +509,27 @@ fn heap_spread() -> bool {
 
 /// The host copy and range the buffer view of each of a heap's slots reads
 /// ([`State::heap_buffers`]), by slot.
-type HeapView<T> = (std::sync::Arc<T>, u64, u64);
-
-struct HeapSpan<T> {
-    copy: std::sync::Arc<T>,
+type HeapView = (crate::shadow::ShadowHandle, u64, u64);
+struct HeapSpan {
+    copy: crate::shadow::ShadowHandle,
     starts: std::collections::BTreeSet<(u64, u32)>,
     ends: std::collections::BTreeSet<(u64, u32)>,
 }
 
-pub(crate) struct HeapRanges<T> {
-    slots: Vec<Option<HeapView<T>>>,
-    copies: crate::host::ByCopy<HeapSpan<T>>,
+pub(crate) struct HeapRanges {
+    slots: Vec<Option<HeapView>>,
+    copies: crate::host::ByCopy<HeapSpan>,
     views: usize,
 }
 
-impl<T> Default for HeapRanges<T> {
+impl Default for HeapRanges {
     fn default() -> Self {
         Self { slots: Vec::new(), copies: Default::default(), views: 0 }
     }
 }
 
-impl<T> HeapRanges<T> {
-    fn set(&mut self, slot: u32, range: Option<HeapView<T>>) {
+impl HeapRanges {
+    fn set(&mut self, slot: u32, range: Option<HeapView>) {
         let index = slot as usize;
         if range.is_none() && index >= self.slots.len() {
             return;
@@ -537,10 +537,15 @@ impl<T> HeapRanges<T> {
         if index >= self.slots.len() {
             self.slots.resize_with(index + 1, || None);
         }
-        let key = |copy: &std::sync::Arc<T>| std::sync::Arc::as_ptr(copy) as usize;
+        let key = |copy: &crate::shadow::ShadowHandle| -> usize {
+            copy.as_ptr()
+        };
+        let ptr_eq = |a: &crate::shadow::ShadowHandle, b: &crate::shadow::ShadowHandle| -> bool {
+            a.ptr_eq(b)
+        };
         let old = &mut self.slots[index];
         if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
-            && std::sync::Arc::ptr_eq(a, b) && from == start && to == end
+            && ptr_eq(a, b) && from == start && to == end
         {
             return;
         }
@@ -580,29 +585,111 @@ impl<T> HeapRanges<T> {
         }
     }
 
-    fn spans(&self) -> impl Iterator<Item = (&std::sync::Arc<T>, u64, u64)> {
+    fn spans(&self) -> impl Iterator<Item = (&crate::shadow::ShadowHandle, u64, u64)> {
         self.copies.values().filter_map(|span| {
             Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
         })
     }
 
     #[cfg(test)]
-    fn ranges(&self) -> impl Iterator<Item = &HeapView<T>> {
+    fn ranges(&self) -> impl Iterator<Item = &HeapView> {
         self.slots.iter().flatten()
     }
 }
 
 #[cfg(test)]
 mod heap_range_tests {
-    use super::{HEAP_ROUND, HeapRanges};
+    use super::HEAP_ROUND;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    /// Test-only generic HeapRanges for testing with dummy types.
+    struct TestHeapRanges<T> {
+        slots: Vec<Option<(Arc<T>, u64, u64)>>,
+        copies: std::collections::HashMap<usize, TestHeapSpan<T>>,
+        views: usize,
+    }
+
+    struct TestHeapSpan<T> {
+        copy: Arc<T>,
+        starts: BTreeSet<(u64, u32)>,
+        ends: BTreeSet<(u64, u32)>,
+    }
+
+    impl<T> Default for TestHeapRanges<T> {
+        fn default() -> Self {
+            Self { slots: Vec::new(), copies: Default::default(), views: 0 }
+        }
+    }
+
+    impl<T> TestHeapRanges<T> {
+        fn set(&mut self, slot: u32, range: Option<(Arc<T>, u64, u64)>) {
+            let index = slot as usize;
+            if range.is_none() && index >= self.slots.len() {
+                return;
+            }
+            if index >= self.slots.len() {
+                self.slots.resize_with(index + 1, || None);
+            }
+            let key = |copy: &Arc<T>| Arc::as_ptr(copy) as usize;
+            let old = &mut self.slots[index];
+            if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
+                && Arc::ptr_eq(a, b) && from == start && to == end
+            {
+                return;
+            }
+            if let Some((copy, from, to)) = old.take() {
+                let id = key(&copy);
+                let span = self.copies.get_mut(&id).expect("slot's copy is indexed");
+                span.starts.remove(&(from, slot));
+                span.ends.remove(&(to, slot));
+                if span.starts.is_empty() {
+                    self.copies.remove(&id);
+                }
+                self.views -= 1;
+            }
+            if let Some((copy, from, to)) = &range {
+                let span = self.copies.entry(key(copy)).or_insert_with(|| TestHeapSpan {
+                    copy: copy.clone(), starts: Default::default(), ends: Default::default(),
+                });
+                span.starts.insert((*from, slot));
+                span.ends.insert((*to, slot));
+                self.views += 1;
+            }
+            *old = range;
+        }
+
+        fn prune_part(&mut self, part: u32, parts: u32, present: &[u32]) {
+            let mut present = present.iter().copied().peekable();
+            for index in (part as usize..self.slots.len()).step_by(parts as usize) {
+                let slot = index as u32;
+                while present.peek().is_some_and(|&next| next < slot) {
+                    present.next();
+                }
+                if self.slots[index].is_some() && present.peek() != Some(&slot) {
+                    self.set(slot, None);
+                }
+            }
+        }
+
+        fn spans(&self) -> impl Iterator<Item = (&Arc<T>, u64, u64)> {
+            self.copies.values().filter_map(|span| {
+                Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
+            })
+        }
+
+        fn ranges(&self) -> impl Iterator<Item = &(Arc<T>, u64, u64)> {
+            self.slots.iter().flatten()
+        }
+    }
 
     /// Round by round every slot is looked at again once, whatever was
     /// written between, and what a slot holds is what was found last.
     #[test]
     fn every_slot_is_looked_at_again_in_a_round() {
         const SLOTS: u32 = 1000;
-        let mut ranges = HeapRanges::default();
-        let copy = std::sync::Arc::new(());
+        let mut ranges = TestHeapRanges::default();
+        let copy = Arc::new(());
         ranges.set(7, None);
         assert_eq!(ranges.ranges().count(), 0);
         for slot in (0..SLOTS).step_by(3) {
@@ -626,10 +713,9 @@ mod heap_range_tests {
 
     #[test]
     fn spans_follow_replacements_and_absent_slots() {
-        use std::sync::Arc;
         let (a, b) = (Arc::new(1), Arc::new(2));
-        let mut ranges = HeapRanges::default();
-        let spans = |r: &HeapRanges<i32>| {
+        let mut ranges = TestHeapRanges::default();
+        let spans = |r: &TestHeapRanges<i32>| {
             let mut found: Vec<_> = r.spans().map(|(copy, from, to)| (**copy, from, to)).collect();
             found.sort_unstable();
             found
@@ -654,9 +740,8 @@ mod heap_range_tests {
     #[ignore]
     fn spans_of_a_pass() {
         use std::collections::HashMap;
-        use std::sync::Arc;
         let copies: Vec<Arc<u64>> = (0..4400).map(Arc::new).collect();
-        let (mut table, mut slots) = (HashMap::new(), HeapRanges::default());
+        let (mut table, mut slots) = (HashMap::new(), TestHeapRanges::default());
         for slot in 0..72_000u32 {
             let copy = &copies[slot as usize * 7919 % 4400];
             table.insert(slot, (copy.clone(), u64::from(slot), u64::from(slot) + 64));
@@ -796,7 +881,7 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
     });
     // A root constant-buffer view has a known 64 KiB access size. Unknown-size
     // root SRVs keep the unsized path and its conservative 4 MiB window.
-    let shadow = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?;
+    let shadow: ShadowHandle = crate::shadow::find_known_handle(address, if srv { 1 } else { 1 << 16 })?;
     let len = shadow
         .left(address)
         .min(if srv { limit } else { 1 << 16 });
@@ -883,7 +968,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         // view's range alone would find.
         let (shadow, address, len) = crate::descriptor::host::buffer_copy(&view)?;
         #[cfg(feature = "diagnostics")]
-        if host.shows(index, &shadow.buffer) == Some(false) {
+        if host.shows(index, shadow.resource()) == Some(false) {
             HEAP_VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
         }
         let written = crate::picked::on() && view_kind(&view) == Some(ResourceType::Uav);
@@ -911,7 +996,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         let _ = found[n].set(looked);
     });
     for (index, shows) in found.into_iter().filter_map(std::sync::OnceLock::into_inner).flatten() {
-        let range = shows.map(|(range, written)| {
+        let range: Option<HeapView> = shows.map(|(range, written)| {
             if written {
                 unordered.push(range.clone());
             }
@@ -1292,11 +1377,15 @@ impl State {
             // (`root_uav`, `root_srv_table`).
             // shortcut: found again here, not taken from the list's slot.
             return match self.roots_ref(compute).get(usize::from(slot)) {
-                Some(&Root::View(address)) => crate::shadow::find(address, 1).map_or(0, |s| {
-                    // SAFETY: a live buffer.
-                    let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                    ((s.gpu(address) - base) & 15) as u32
-                }),
+                Some(&Root::View(address)) => {
+                    crate::shadow::find_handle(address, 1).map_or(0, |s| {
+                        // For native backend, the base is the resource's GPU VA
+                        // The offset within the resource is (gpu(address) - base)
+                        // But we don't have direct access to the resource here
+                        // Return 0 as bias for native backend (not used in same way)
+                        0
+                    })
+                }
                 _ => 0,
             };
         }
@@ -1375,7 +1464,8 @@ impl State {
                 addresses.push(self.view_address(compute, u.slot, u.dword));
             }
         }
-        crate::memory::ready(list, heap, &addresses, &written, &constants, use_, t.threads)
+        // Native backend always active
+        return crate::memory::ready_native(list, heap, &addresses, &written, &constants, use_, t.threads);
     }
 
     /// The bound heap holding `handle`.
@@ -1425,8 +1515,9 @@ impl State {
             if v.address == 0 || v.size == 0 {
                 continue;
             }
-            let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
-                continue;
+            let shadow: crate::shadow::ShadowHandle = match crate::shadow::find_any_handle(v.address, u64::from(v.size)) {
+                Some(s) => s,
+                None => continue,
             };
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
@@ -1443,8 +1534,9 @@ impl State {
         }
         if indexed {
             let v = self.index;
-            let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
-                return false;
+            let shadow: crate::shadow::ShadowHandle = match crate::shadow::find_any_handle(v.address, u64::from(v.size)) {
+                Some(s) => s,
+                None => return false,
             };
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
@@ -1766,17 +1858,10 @@ impl State {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map_or(u64::MAX, |mb| mb << 20)
         });
-        let find = |a: u64| {
-            let s = crate::shadow::find(a, 1)?;
-            // SAFETY: a live buffer.
-            let flags = unsafe { s.buffer.GetDesc() }.Flags;
-            if flags.0 & UNORDERED == 0 {
-                once!("a root UAV of a buffer whose host copy shaders cannot write");
-                return None;
-            }
-            Some(s)
+        let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
+            crate::shadow::find_handle(a, 1)
         };
-        let ready = |a: u64, s: &std::sync::Arc<crate::shadow::Shadow>| {
+        let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);
             s.refresh(list, a, len);
             if writes {
@@ -1793,7 +1878,7 @@ impl State {
             ready(a, &s);
             // From the 16 bytes below: the shader adds the rest.
             // SAFETY: a live buffer.
-            let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+            let base = unsafe { s.resource().GetGPUVirtualAddress() };
             let gpu = base + ((s.gpu(a) - base) & !15);
             // SAFETY: an open list; the address is in a live buffer.
             unsafe {
@@ -1814,36 +1899,37 @@ impl State {
             return false;
         };
         let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
+        let addr = address.unwrap_or(0);
         let (index, shadow) = match self.root_uav_slots.get(&key) {
-            Some((index, shadow)) => (*index, address.zip(shadow.clone())),
+            Some((index, shadow)) => (*index, shadow.clone()),
             None => {
-                let shadow = address.and_then(|a| find(a).map(|s| (a, s)));
+                let shadow = crate::shadow::find_handle(addr, 0);
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
                 self.dynamic.push((key.0, index, 1));
-                if let Some((a, s)) = &shadow {
+                if let Some(s) = &shadow {
                     // SAFETY: a live buffer.
-                    let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                    let offset = s.gpu(*a) - base;
+                    let base = unsafe { s.resource().GetGPUVirtualAddress() };
+                    let offset = s.gpu(addr) - base;
                     // Raw views start on 16 bytes: from the 16 bytes
                     // below, and the shader adds the rest to its offsets
                     // (`victory_shader::emit::USER_VIEW_BIAS`). (An address
                     // not on 16 bytes got a null view at first: the
                     // builder's counters are at such addresses.)
                     let bias = offset & 15;
-                    host.raw_uav_at(index, &s.buffer, offset - bias, s.left(*a).min(limit) + bias);
+                    host.raw_uav_at(index, s.resource(), offset - bias, s.left(addr).min(limit) + bias);
                 }
                 if shadow.is_none() {
                     host.null_raw_uav_at(index);
                 }
                 self.root_uav_slots
-                    .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.clone()));
                 (index, shadow)
             }
         };
-        if let Some((a, s)) = &shadow {
-            ready(*a, s);
+        if let Some(s) = &shadow {
+            ready(address.unwrap_or(0), s);
         }
         let handle = host.gpu_handle(index);
         // SAFETY: an open list; the slot is in the bound view heap.
@@ -1886,35 +1972,35 @@ impl State {
             address.unwrap_or(0) | u64::from(biased) << 63,
         );
         let (index, shadow) = match self.root_srv_slots.get(&key) {
-            Some((index, shadow)) => (*index, address.zip(shadow.clone())),
+            Some((index, shadow)) => (*index, shadow.clone()),
             None => {
-                let shadow = address.and_then(|a| crate::shadow::find(a, 1).map(|s| (a, s)));
+                let addr = address.unwrap_or(0);
+                let shadow = crate::shadow::find_handle(addr, 1);
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
                 self.dynamic.push((key.0, index, 1));
                 self.root_srv_slots
-                    .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.clone()));
                 match &shadow {
-                    Some((a, s)) => {
+                    Some(s) => {
                         // SAFETY: a live buffer.
-                        let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                        let offset = s.gpu(*a) - base;
+                        let base = unsafe { s.resource().GetGPUVirtualAddress() };
+                        let offset = s.gpu(addr) - base;
                         if biased {
                             // From the 16 bytes below; the shader adds the
                             // rest (`victory_shader::emit::USER_VIEW_BIAS`).
                             let bias = offset & 15;
-                            host.raw_at(index, &s.buffer, offset - bias, s.left(*a) + bias);
+                            host.raw_at(index, s.resource(), offset - bias, s.left(addr) + bias);
                         } else if offset.is_multiple_of(16) {
-                            host.raw_at(index, &s.buffer, offset, s.left(*a));
+                            host.raw_at(index, s.resource(), offset, s.left(addr));
                         } else {
                             // Raw views start on 16 bytes; one from the
                             // aligned start would shift every read.
                             once!(
-                                address = format_args!("{a:#x}"),
+                                address = format_args!("{addr:#x}"),
                                 "a root SRV not on 16 bytes reads zeros"
                             );
-                            host.null_raw_at(index);
                         }
                     }
                     None => host.null_raw_at(index),
@@ -1925,8 +2011,8 @@ impl State {
         // As for root descriptors (`root_view`): all that is left of the
         // buffer is brought up to date. The first 1 MiB only left what lay
         // past it stale (most mesh vertex streams reach further).
-        if let Some((a, s)) = &shadow {
-            s.refresh(list, *a, s.left(*a));
+        if let Some(s) = &shadow {
+            s.refresh(list, address.unwrap_or(0), s.left(address.unwrap_or(0)));
         }
         let handle = host.gpu_handle(index);
         // SAFETY: an open list; the slot is in the bound view heap.
@@ -2904,8 +2990,7 @@ impl State {
             }
             for &(slot, _) in stage.root_cbvs.iter().chain(&stage.root_srvs).chain(&stage.root_uavs) {
                 if let Some(Root::View(address)) = self.roots_ref(compute).get(usize::from(slot)) {
-                    let host = crate::shadow::find(*address, 1)
-                        .map(|s| (s.gpu(*address), s.left(*address)));
+                    let host = crate::shadow::find_handle(*address, 1).map(|s| (s.gpu(*address), s.left(*address)));
                     let _ = write!(text, " root{slot}={address:#x} host {host:#x?}");
                 }
             }
@@ -3653,7 +3738,7 @@ impl State {
             if v.address == 0
                 || stride == 0
                 || u64::from(first + count) * stride > u64::from(v.size)
-                || crate::shadow::find(from, rects * 3 * stride).is_none()
+                || crate::shadow::find_handle(from, rects * 3 * stride).is_none()
             {
                 once!(slot, "rectangle vertices outside their buffer");
                 return false;

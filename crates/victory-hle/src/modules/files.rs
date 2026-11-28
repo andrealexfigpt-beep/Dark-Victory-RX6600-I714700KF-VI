@@ -562,9 +562,123 @@ pub extern "system" fn ReadFile(
     done
 }
 
+/// Async I/O: ReadFileEx with completion routine.
+pub extern "system" fn ReadFileEx(
+    file: *mut c_void,
+    buffer: *mut u8,
+    len: u32,
+    overlapped: *mut c_void,
+    completion_routine: extern "system" fn(u32, u32, *mut c_void),
+) -> i32 {
+    host!("kernel32.dll", "ReadFileEx": extern "system" fn(*mut c_void, *mut u8, u32, *mut c_void, extern "system" fn(u32, u32, *mut c_void)) -> i32)(
+        file, buffer, len, overlapped, completion_routine,
+    )
+}
+
+/// Async I/O: WriteFileEx with completion routine.
+pub extern "system" fn WriteFileEx(
+    file: *mut c_void,
+    buffer: *const u8,
+    len: u32,
+    overlapped: *mut c_void,
+    completion_routine: extern "system" fn(u32, u32, *mut c_void),
+) -> i32 {
+    host!("kernel32.dll", "WriteFileEx": extern "system" fn(*mut c_void, *const u8, u32, *mut c_void, extern "system" fn(u32, u32, *mut c_void)) -> i32)(
+        file, buffer, len, overlapped, completion_routine,
+    )
+}
+
+/// GetOverlappedResult: retrieve results of overlapped operation.
+pub extern "system" fn GetOverlappedResult(
+    file: *mut c_void,
+    overlapped: *mut c_void,
+    transferred: *mut u32,
+    wait: i32,
+) -> i32 {
+    host!("kernel32.dll", "GetOverlappedResult": extern "system" fn(*mut c_void, *mut c_void, *mut u32, i32) -> i32)(
+        file, overlapped, transferred, wait,
+    )
+}
+
+/// GetOverlappedResultEx: extended version with timeout.
+pub extern "system" fn GetOverlappedResultEx(
+    file: *mut c_void,
+    overlapped: *mut c_void,
+    transferred: *mut u32,
+    milliseconds: u32,
+    alertable: i32,
+) -> i32 {
+    host!("kernel32.dll", "GetOverlappedResultEx": extern "system" fn(*mut c_void, *mut c_void, *mut u32, u32, i32) -> i32)(
+        file, overlapped, transferred, milliseconds, alertable,
+    )
+}
+
+/// CancelIo: cancel all pending I/O for the calling thread.
+pub extern "system" fn CancelIo(file: *mut c_void) -> i32 {
+    host!("kernel32.dll", "CancelIo": extern "system" fn(*mut c_void) -> i32)(file)
+}
+
+/// CancelIoEx: cancel specific overlapped I/O.
+pub extern "system" fn CancelIoEx(file: *mut c_void, overlapped: *mut c_void) -> i32 {
+    host!("kernel32.dll", "CancelIoEx": extern "system" fn(*mut c_void, *mut c_void) -> i32)(
+        file, overlapped,
+    )
+}
+
+/// CreateIoCompletionPort: associate file with completion port.
+pub extern "system" fn CreateIoCompletionPort(
+    file: *mut c_void,
+    existing_port: *mut c_void,
+    completion_key: usize,
+    concurrent_threads: u32,
+) -> *mut c_void {
+    host!("kernel32.dll", "CreateIoCompletionPort": extern "system" fn(*mut c_void, *mut c_void, usize, u32) -> *mut c_void)(
+        file, existing_port, completion_key, concurrent_threads,
+    )
+}
+
+/// GetQueuedCompletionStatus: dequeue completion packet.
+pub extern "system" fn GetQueuedCompletionStatus(
+    port: *mut c_void,
+    transferred: *mut u32,
+    completion_key: *mut usize,
+    overlapped: *mut *mut c_void,
+    milliseconds: u32,
+) -> i32 {
+    host!("kernel32.dll", "GetQueuedCompletionStatus": extern "system" fn(*mut c_void, *mut u32, *mut usize, *mut *mut c_void, u32) -> i32)(
+        port, transferred, completion_key, overlapped, milliseconds,
+    )
+}
+
+/// GetQueuedCompletionStatusEx: dequeue multiple completion packets.
+pub extern "system" fn GetQueuedCompletionStatusEx(
+    port: *mut c_void,
+    entries: *mut c_void,
+    count: u32,
+    num_removed: *mut u32,
+    milliseconds: u32,
+    alertable: i32,
+) -> i32 {
+    host!("kernel32.dll", "GetQueuedCompletionStatusEx": extern "system" fn(*mut c_void, *mut c_void, u32, *mut u32, u32, i32) -> i32)(
+        port, entries, count, num_removed, milliseconds, alertable,
+    )
+}
+
+/// PostQueuedCompletionStatus: post a completion packet manually.
+pub extern "system" fn PostQueuedCompletionStatus(
+    port: *mut c_void,
+    transferred: u32,
+    completion_key: usize,
+    overlapped: *mut c_void,
+) -> i32 {
+    host!("kernel32.dll", "PostQueuedCompletionStatus": extern "system" fn(*mut c_void, u32, usize, *mut c_void) -> i32)(
+        port, transferred, completion_key, overlapped,
+    )
+}
+
 /// The host CRT reads large requests straight into the caller's buffer
 /// through the kernel, whose write fails on a guarded block instead of
-/// faulting into the guard. So the bytes are read beside, a chunk at a time
+/// faulting into its guard. So the bytes are read beside, a chunk at a time
 /// (a caller may ask for far more than the file holds), and copied in from
 /// user mode, where a guarded block faults into the guard like the title's
 /// own writes. Returns the items read, as the CRT does; the bytes of a
@@ -722,6 +836,16 @@ pub(crate) fn module() -> HleModule {
         ],
         exports: vec![
             hle_export!(ReadFile),
+            hle_export!(ReadFileEx),
+            hle_export!(WriteFileEx),
+            hle_export!(GetOverlappedResult),
+            hle_export!(GetOverlappedResultEx),
+            hle_export!(CancelIo),
+            hle_export!(CancelIoEx),
+            hle_export!(CreateIoCompletionPort),
+            hle_export!(GetQueuedCompletionStatus),
+            hle_export!(GetQueuedCompletionStatusEx),
+            hle_export!(PostQueuedCompletionStatus),
             hle_export!(fread),
             hle_export!(CreateFileW),
             hle_export!(CreateFileA),

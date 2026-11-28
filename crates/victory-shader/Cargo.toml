@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 zlib-rs.workspace = true
+serde = { version = "1.0", features = ["derive"] }
 
 [features]
 # Host D3D12 pipeline checks (`emit::host`).

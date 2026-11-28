@@ -237,13 +237,14 @@ impl State {
 
 /// The pass over the heap's buffer views (`crate::draw`): the unordered ones
 /// it looked at (copy, from, to); `all` if those are all there are.
-pub(crate) fn shown(views: Vec<(Arc<Shadow>, u64, u64)>, all: bool) {
+pub(crate) fn shown(views: Vec<(crate::shadow::ShadowHandle, u64, u64)>, all: bool) {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let state = state.get_or_insert_with(State::default);
     if all {
         state.shown.clear();
     }
     for (copy, from, to) in views.into_iter().filter(|v| v.0.carded() && v.1 < v.2) {
+        let crate::shadow::ShadowHandle::Legacy(copy) = copy else { continue };
         let e = state.shown.entry(copy.id()).or_insert_with(|| Shown {
             copy: Arc::downgrade(&copy),
             from,

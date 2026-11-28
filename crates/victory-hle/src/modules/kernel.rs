@@ -9,7 +9,44 @@
 
 use std::ffi::{CStr, c_char, c_void};
 
+use windows_sys::Win32::System::SystemInformation::SYSTEM_INFO;
+use windows_sys::Win32::System::Threading::{CreateThread, GetCurrentThread, GetCurrentThreadId};
+
 use crate::{HleModule, HostPolicy, hle_export, registry, runtime};
+
+/// Extended SYSTEM_INFO for titles that expect a specific layout.
+#[repr(C)]
+pub struct SYSTEM_INFO_EX {
+    pub wProcessorArchitecture: u16,
+    pub wReserved: u16,
+    pub dwPageSize: u32,
+    pub lpMinimumApplicationAddress: *mut c_void,
+    pub lpMaximumApplicationAddress: *mut c_void,
+    pub dwActiveProcessorMask: usize,
+    pub dwNumberOfProcessors: u32,
+    pub dwProcessorType: u32,
+    pub dwAllocationGranularity: u32,
+    pub wProcessorLevel: u16,
+    pub wProcessorRevision: u16,
+}
+
+impl From<SYSTEM_INFO> for SYSTEM_INFO_EX {
+    fn from(info: SYSTEM_INFO) -> Self {
+        SYSTEM_INFO_EX {
+            wProcessorArchitecture: unsafe { info.Anonymous.Anonymous.wProcessorArchitecture },
+            wReserved: unsafe { info.Anonymous.Anonymous.wReserved },
+            dwPageSize: info.dwPageSize,
+            lpMinimumApplicationAddress: info.lpMinimumApplicationAddress,
+            lpMaximumApplicationAddress: info.lpMaximumApplicationAddress,
+            dwActiveProcessorMask: info.dwActiveProcessorMask as usize,
+            dwNumberOfProcessors: info.dwNumberOfProcessors,
+            dwProcessorType: info.dwProcessorType,
+            dwAllocationGranularity: info.dwAllocationGranularity,
+            wProcessorLevel: info.wProcessorLevel,
+            wProcessorRevision: info.wProcessorRevision,
+        }
+    }
+}
 
 /// `GetModuleHandleW(NULL)` must return the title's image, not our exe;
 /// title images and our console modules are found by name.
@@ -434,6 +471,252 @@ pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> 
     unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
 }
 
+/// GetThreadPriority: retrieve thread priority.
+pub use windows_sys::Win32::System::Threading::GetThreadPriority;
+
+/// SetThreadPriorityBoost: disable/enable priority boost.
+pub use windows_sys::Win32::System::Threading::SetThreadPriorityBoost;
+
+/// GetThreadPriorityBoost: check if priority boost is disabled.
+pub use windows_sys::Win32::System::Threading::GetThreadPriorityBoost;
+
+/// SetProcessPriorityBoost: disable/enable process priority boost.
+pub use windows_sys::Win32::System::Threading::SetProcessPriorityBoost;
+
+/// GetProcessPriorityBoost: check if process priority boost is disabled.
+pub use windows_sys::Win32::System::Threading::GetProcessPriorityBoost;
+
+/// SetThreadIdealProcessor: set ideal processor for thread.
+pub use windows_sys::Win32::System::Threading::SetThreadIdealProcessor;
+
+/// GetThreadIdealProcessorEx: get ideal processor for thread.
+pub use windows_sys::Win32::System::Threading::GetThreadIdealProcessorEx;
+
+/// SetThreadAffinityMask: set thread affinity.
+pub use windows_sys::Win32::System::Threading::SetThreadAffinityMask;
+
+/// GetProcessAffinityMask: get process affinity mask.
+pub use windows_sys::Win32::System::Threading::GetProcessAffinityMask;
+
+/// SwitchToThread: yield to another thread.
+pub use windows_sys::Win32::System::Threading::SwitchToThread;
+
+/// Sleep: sleep for specified milliseconds.
+pub use windows_sys::Win32::System::Threading::Sleep;
+
+/// SleepEx: alertable sleep.
+pub use windows_sys::Win32::System::Threading::SleepEx;
+
+/// CreateEventA: create event object.
+pub use windows_sys::Win32::System::Threading::CreateEventA;
+
+/// CreateEventW: create event object (wide).
+pub use windows_sys::Win32::System::Threading::CreateEventW;
+
+/// CreateEventExA: create event object with extended options.
+pub use windows_sys::Win32::System::Threading::CreateEventExA;
+
+/// CreateEventExW: create event object with extended options (wide).
+pub use windows_sys::Win32::System::Threading::CreateEventExW;
+
+/// SetEvent: signal an event.
+pub use windows_sys::Win32::System::Threading::SetEvent;
+
+/// ResetEvent: reset an event to non-signaled state.
+pub use windows_sys::Win32::System::Threading::ResetEvent;
+
+/// PulseEvent: pulse an event (signal and reset).
+pub use windows_sys::Win32::System::Threading::PulseEvent;
+
+/// WaitForSingleObject: wait for an object.
+pub use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+/// WaitForSingleObjectEx: alertable wait.
+pub use windows_sys::Win32::System::Threading::WaitForSingleObjectEx;
+
+/// WaitForMultipleObjects: wait for multiple objects.
+pub use windows_sys::Win32::System::Threading::WaitForMultipleObjects;
+
+/// WaitForMultipleObjectsEx: alertable wait for multiple objects.
+pub use windows_sys::Win32::System::Threading::WaitForMultipleObjectsEx;
+
+/// CreateMutexA: create mutex.
+pub use windows_sys::Win32::System::Threading::CreateMutexA;
+
+/// CreateMutexW: create mutex (wide).
+pub use windows_sys::Win32::System::Threading::CreateMutexW;
+
+/// CreateMutexExA: create mutex with extended options.
+pub use windows_sys::Win32::System::Threading::CreateMutexExA;
+
+/// CreateMutexExW: create mutex with extended options (wide).
+pub use windows_sys::Win32::System::Threading::CreateMutexExW;
+
+/// ReleaseMutex: release mutex ownership.
+pub use windows_sys::Win32::System::Threading::ReleaseMutex;
+
+/// CreateSemaphoreA: create semaphore.
+pub use windows_sys::Win32::System::Threading::CreateSemaphoreA;
+
+/// CreateSemaphoreW: create semaphore (wide).
+pub use windows_sys::Win32::System::Threading::CreateSemaphoreW;
+
+/// CreateSemaphoreExA: create semaphore with extended options.
+pub use windows_sys::Win32::System::Threading::CreateSemaphoreExA;
+
+/// CreateSemaphoreExW: create semaphore with extended options (wide).
+pub use windows_sys::Win32::System::Threading::CreateSemaphoreExW;
+
+/// ReleaseSemaphore: release semaphore.
+pub use windows_sys::Win32::System::Threading::ReleaseSemaphore;
+
+/// CreateWaitableTimerA: create waitable timer.
+pub use windows_sys::Win32::System::Threading::CreateWaitableTimerA;
+
+/// CreateWaitableTimerW: create waitable timer (wide).
+pub use windows_sys::Win32::System::Threading::CreateWaitableTimerW;
+
+/// CreateWaitableTimerExA: create waitable timer with extended options.
+pub use windows_sys::Win32::System::Threading::CreateWaitableTimerExA;
+
+/// CreateWaitableTimerExW: create waitable timer with extended options (wide).
+pub use windows_sys::Win32::System::Threading::CreateWaitableTimerExW;
+
+/// SetWaitableTimer: set a waitable timer.
+pub use windows_sys::Win32::System::Threading::SetWaitableTimer;
+
+/// SetWaitableTimerEx: set waitable timer with extended options.
+pub use windows_sys::Win32::System::Threading::SetWaitableTimerEx;
+
+/// CancelWaitableTimer: cancel a waitable timer.
+pub use windows_sys::Win32::System::Threading::CancelWaitableTimer;
+
+/// QueryPerformanceCounter: high-resolution timer.
+pub use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
+
+/// QueryPerformanceFrequency: get timer frequency.
+pub use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
+
+/// GetTickCount: system tick count (low resolution).
+pub use windows_sys::Win32::System::SystemInformation::GetTickCount;
+
+/// GetTickCount64: 64-bit system tick count.
+pub use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+
+/// timeGetTime: multimedia timer.
+pub use windows_sys::Win32::Media::timeGetTime;
+
+/// timeBeginPeriod: set minimum timer resolution.
+pub use windows_sys::Win32::Media::timeBeginPeriod;
+
+/// timeEndPeriod: restore timer resolution.
+pub use windows_sys::Win32::Media::timeEndPeriod;
+
+/// VirtualAlloc: reserve/commit memory.
+pub use windows_sys::Win32::System::Memory::VirtualAlloc;
+
+/// VirtualAllocEx: allocate in another process.
+pub use windows_sys::Win32::System::Memory::VirtualAllocEx;
+
+/// VirtualFree: free/reserve memory.
+pub use windows_sys::Win32::System::Memory::VirtualFree;
+
+/// VirtualFreeEx: free memory in another process.
+pub use windows_sys::Win32::System::Memory::VirtualFreeEx;
+
+/// VirtualProtect: change memory protection.
+pub use windows_sys::Win32::System::Memory::VirtualProtect;
+
+/// VirtualProtectEx: change memory protection in another process.
+pub use windows_sys::Win32::System::Memory::VirtualProtectEx;
+
+/// VirtualQuery: query memory information.
+pub use windows_sys::Win32::System::Memory::VirtualQuery;
+
+/// VirtualQueryEx: query memory in another process.
+pub use windows_sys::Win32::System::Memory::VirtualQueryEx;
+
+/// GetSystemInfo: get system information.
+pub use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
+
+/// GetNativeSystemInfo: get native system information.
+pub use windows_sys::Win32::System::SystemInformation::GetNativeSystemInfo;
+
+/// GetSystemTimeAsFileTime: get system time as file time.
+pub use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+
+/// GetSystemTimePreciseAsFileTime: precise system time.
+pub use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+
+/// GetLocalTime: get local time.
+pub use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+/// GetSystemTime: get UTC time.
+pub use windows_sys::Win32::System::SystemInformation::GetSystemTime;
+
+/// SetLocalTime: set local time.
+pub use windows_sys::Win32::System::SystemInformation::SetLocalTime;
+
+/// SetSystemTime: set UTC time.
+pub use windows_sys::Win32::System::SystemInformation::SetSystemTime;
+
+/// GetSystemTimeAdjustment: get time adjustment.
+pub use windows_sys::Win32::System::SystemInformation::GetSystemTimeAdjustment;
+
+/// SetSystemTimeAdjustment: set time adjustment.
+pub use windows_sys::Win32::System::SystemInformation::SetSystemTimeAdjustment;
+
+/// IsProcessorFeaturePresent: check processor feature.
+pub use windows_sys::Win32::System::Threading::IsProcessorFeaturePresent;
+
+/// GetLogicalProcessorInformation: get logical processor info.
+pub use windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformation;
+
+/// GetLogicalProcessorInformationEx: extended processor info.
+pub use windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformationEx;
+
+/// GetNumaHighestNodeNumber: get highest NUMA node.
+pub use windows_sys::Win32::System::Threading::GetNumaHighestNodeNumber;
+
+/// GetNumaNodeProcessorMaskEx: get NUMA node processor mask.
+pub use windows_sys::Win32::System::Threading::GetNumaNodeProcessorMaskEx;
+
+/// GetNumaProcessorNodeEx: get NUMA node for processor.
+pub use windows_sys::Win32::System::Threading::GetNumaProcessorNodeEx;
+
+/// GetNumaAvailableMemoryNodeEx: get available memory on NUMA node.
+pub use windows_sys::Win32::System::Threading::GetNumaAvailableMemoryNodeEx;
+
+/// GetProcessWorkingSetSize: get process working set size.
+pub use windows_sys::Win32::System::Threading::GetProcessWorkingSetSize;
+
+/// SetProcessWorkingSetSize: set process working set size.
+pub use windows_sys::Win32::System::Threading::SetProcessWorkingSetSize;
+
+/// GetProcessWorkingSetSizeEx: extended working set query.
+pub use windows_sys::Win32::System::Memory::GetProcessWorkingSetSizeEx;
+
+/// SetProcessWorkingSetSizeEx: extended working set control.
+pub use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
+
+/// FlushProcessWriteBuffers: flush process write buffers.
+pub use windows_sys::Win32::System::Threading::FlushProcessWriteBuffers;
+
+/// GetWriteWatch: get write watch information.
+pub use windows_sys::Win32::System::Memory::GetWriteWatch;
+
+/// ResetWriteWatch: reset write watch.
+pub use windows_sys::Win32::System::Memory::ResetWriteWatch;
+
+/// GetLargePageMinimum: get minimum large page size.
+pub use windows_sys::Win32::System::Memory::GetLargePageMinimum;
+
+/// GetSystemInfo wrapper with SYSTEM_INFO structure.
+/// This is the actual structure layout expected by titles.
+pub extern "system" fn GetSystemInfoEx(lp_system_info: *mut SYSTEM_INFO_EX) {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetSystemInfo(std::mem::transmute(lp_system_info)) }
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -469,6 +752,86 @@ pub(crate) fn module() -> HleModule {
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
             hle_export!(SetThreadPriority),
+            hle_export!(GetThreadPriority),
+            hle_export!(SetThreadPriorityBoost),
+            hle_export!(GetThreadPriorityBoost),
+            hle_export!(SetProcessPriorityBoost),
+            hle_export!(GetProcessPriorityBoost),
+            hle_export!(SetThreadIdealProcessor),
+            hle_export!(GetThreadIdealProcessorEx),
+            hle_export!(SetThreadAffinityMask),
+            hle_export!(GetProcessAffinityMask),
+            hle_export!(SwitchToThread),
+            hle_export!(Sleep),
+            hle_export!(SleepEx),
+            hle_export!(CreateEventA),
+            hle_export!(CreateEventW),
+            hle_export!(CreateEventExA),
+            hle_export!(CreateEventExW),
+            hle_export!(SetEvent),
+            hle_export!(ResetEvent),
+            hle_export!(PulseEvent),
+            hle_export!(WaitForSingleObject),
+            hle_export!(WaitForSingleObjectEx),
+            hle_export!(WaitForMultipleObjects),
+            hle_export!(WaitForMultipleObjectsEx),
+            hle_export!(CreateMutexA),
+            hle_export!(CreateMutexW),
+            hle_export!(CreateMutexExA),
+            hle_export!(CreateMutexExW),
+            hle_export!(ReleaseMutex),
+            hle_export!(CreateSemaphoreA),
+            hle_export!(CreateSemaphoreW),
+            hle_export!(CreateSemaphoreExA),
+            hle_export!(CreateSemaphoreExW),
+            hle_export!(ReleaseSemaphore),
+            hle_export!(CreateWaitableTimerA),
+            hle_export!(CreateWaitableTimerW),
+            hle_export!(CreateWaitableTimerExA),
+            hle_export!(CreateWaitableTimerExW),
+            hle_export!(SetWaitableTimer),
+            hle_export!(SetWaitableTimerEx),
+            hle_export!(CancelWaitableTimer),
+            hle_export!(QueryPerformanceCounter),
+            hle_export!(QueryPerformanceFrequency),
+            hle_export!(GetTickCount),
+            hle_export!(GetTickCount64),
+            hle_export!(timeGetTime),
+            hle_export!(timeBeginPeriod),
+            hle_export!(timeEndPeriod),
+            hle_export!(VirtualAlloc),
+            hle_export!(VirtualAllocEx),
+            hle_export!(VirtualFree),
+            hle_export!(VirtualFreeEx),
+            hle_export!(VirtualProtect),
+            hle_export!(VirtualProtectEx),
+            hle_export!(VirtualQuery),
+            hle_export!(VirtualQueryEx),
+            hle_export!(GetSystemInfo),
+            hle_export!(GetNativeSystemInfo),
+            hle_export!(GetSystemTimeAsFileTime),
+            hle_export!(GetSystemTimePreciseAsFileTime),
+            hle_export!(GetLocalTime),
+            hle_export!(GetSystemTime),
+            hle_export!(SetLocalTime),
+            hle_export!(SetSystemTime),
+            hle_export!(GetSystemTimeAdjustment),
+            hle_export!(SetSystemTimeAdjustment),
+            hle_export!(IsProcessorFeaturePresent),
+            hle_export!(GetLogicalProcessorInformation),
+            hle_export!(GetLogicalProcessorInformationEx),
+            hle_export!(GetNumaHighestNodeNumber),
+            hle_export!(GetNumaNodeProcessorMaskEx),
+            hle_export!(GetNumaProcessorNodeEx),
+            hle_export!(GetNumaAvailableMemoryNodeEx),
+            hle_export!(GetProcessWorkingSetSize),
+            hle_export!(SetProcessWorkingSetSize),
+            hle_export!(GetProcessWorkingSetSizeEx),
+            hle_export!(SetProcessWorkingSetSizeEx),
+            hle_export!(FlushProcessWriteBuffers),
+            hle_export!(GetWriteWatch),
+            hle_export!(ResetWriteWatch),
+            hle_export!(GetLargePageMinimum),
         ],
     }
 }

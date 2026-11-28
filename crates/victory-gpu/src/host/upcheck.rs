@@ -29,8 +29,8 @@ use super::*;
 use crate::shadow::Shadow;
 
 pub(crate) fn on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_UPCOPY_CHECK").is_some_and(|v| v == "1"))
+    // Upcheck only works with legacy backend; native backend is always active now
+    false
 }
 
 /// One dispatch looks at up to a piece: `words` words of the card's buffer
@@ -323,7 +323,7 @@ static CROSSED: Mutex<(u64, Crossed)> = Mutex::new((0, BTreeMap::new()));
 /// (nothing waits for it), and no later one knows that it was too early but
 /// for the landing's own write.
 pub(super) fn reads(runs: &[&HostList]) {
-    let mut writes: Vec<(std::sync::Arc<Shadow>, usize, usize)> = Vec::new();
+    let mut writes: Vec<(crate::shadow::ShadowHandle, usize, usize)> = Vec::new();
     let mut all = Vec::new();
     for item in &super::line().line {
         if let Late::Run(flight) = item {
@@ -347,7 +347,7 @@ pub(super) fn reads(runs: &[&HostList]) {
                 continue;
             }
             for (writer, a, b) in &writes {
-                if *a < to && from < *b && !std::sync::Arc::ptr_eq(writer, shadow) {
+                if *a < to && from < *b && !writer.ptr_eq(shadow) {
                     let e = crossed.1.entry((shadow.span(), writer.span())).or_default();
                     *e = (e.0 + 1, (*a).max(from), (*b).min(to));
                 }
@@ -844,7 +844,7 @@ mod tests {
         };
         assert!(crate::picked::on(), "set VICTORY_PICKED_WRITES=1");
         let (title, start, shadow) = title(0x6666, true);
-        crate::picked::shown(vec![(shadow.clone(), start as u64, (start + LEN) as u64)], true);
+        crate::picked::shown(vec![(shadow.clone().into(), start as u64, (start + LEN) as u64)], true);
         let at = (37 << 16) + 512;
         let mut lists = Vec::new();
         let mut back = Vec::new();

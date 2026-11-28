@@ -11,6 +11,7 @@
 #[cfg(windows)]
 pub mod apu;
 pub mod audio;
+#[cfg(windows)]
 pub mod d3d12x;
 pub mod display;
 pub mod dsp;
@@ -20,7 +21,10 @@ pub mod dstorage;
 pub mod files;
 pub mod gameinput;
 #[cfg(windows)]
+pub mod xaudio2;
+#[cfg(windows)]
 pub mod ffx;
+#[cfg(windows)]
 pub mod kernel;
 #[cfg(windows)]
 pub mod lifecycle;
@@ -36,6 +40,7 @@ pub mod xg;
 pub mod xgame;
 pub mod xgameruntime;
 pub mod xgamesave;
+#[cfg(windows)]
 pub mod xgameui;
 #[cfg(windows)]
 pub mod xmem;
@@ -49,13 +54,17 @@ use crate::HleModule;
 
 pub(crate) fn all() -> Vec<HleModule> {
     let mut all = vec![
+        #[cfg(windows)]
         kernel::module(),
         xgameruntime::module(),
         gameinput::module(),
+        #[cfg(windows)]
         d3d12x::module(),
         audio::module(),
         dsp::module(),
         xg::module(),
+        #[cfg(windows)]
+        xaudio2::module(),
     ];
     #[cfg(windows)]
     all.push(apu::module());

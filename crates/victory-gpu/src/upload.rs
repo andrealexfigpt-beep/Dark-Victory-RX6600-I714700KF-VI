@@ -89,6 +89,7 @@ pub(crate) fn reserve(len: usize) -> Option<usize> {
 
 impl Upload {
     pub(crate) fn new(len: usize) -> Option<Upload> {
+        // Title-visible upload addresses must fit the shader's address width.
         if !low() {
             return Some(Upload(Kind::Heap(vec![0; len])));
         }
@@ -124,11 +125,19 @@ impl Upload {
 
 impl Drop for Upload {
     fn drop(&mut self) {
-        let Kind::Low(at, len) = self.0 else { return };
-        let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(arena) = arenas.iter_mut().find(|a| (a.at..a.at + a.taken.len() * BLOCK).contains(&at)) {
-            let first = (at - arena.at) / BLOCK;
-            arena.taken[first..first + len.max(1).div_ceil(BLOCK)].fill(false);
+        match &self.0 {
+            Kind::Low(at, len) => {
+                let at = *at;
+                let len = *len;
+                let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(arena) = arenas.iter_mut().find(|a| (a.at..a.at + a.taken.len() * BLOCK).contains(&at)) {
+                    let first = (at - arena.at) / BLOCK;
+                    arena.taken[first..first + len.max(1).div_ceil(BLOCK)].fill(false);
+                }
+            }
+            Kind::Heap(_) => {
+                // Heap memory is automatically freed when the Vec is dropped
+            }
         }
     }
 }
