@@ -1459,12 +1459,12 @@ impl State {
             }
             #[cfg(all(windows, feature = "native-memory"))]
             let shadow: crate::shadow::ShadowHandle = if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_any_handle(v.address, u64::from(v.size))
+                crate::shadow::find_any_handle(v.address, u64::from(v.size)).unwrap_or_else(|| crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap())
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap()
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
+            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle).unwrap();
             
             let Some(shadow) = shadow else {
                 continue;
@@ -1486,12 +1486,12 @@ impl State {
             let v = self.index;
             #[cfg(all(windows, feature = "native-memory"))]
             let shadow: crate::shadow::ShadowHandle = if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_any_handle(v.address, u64::from(v.size))
+                crate::shadow::find_any_handle(v.address, u64::from(v.size)).unwrap_or_else(|| crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap())
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap()
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
+            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle).unwrap();
             
             let Some(shadow) = shadow else {
                 return false;
@@ -1817,19 +1817,16 @@ impl State {
                 .map_or(u64::MAX, |mb| mb << 20)
         });
         #[cfg(all(windows, feature = "native-memory"))]
-        let find = |a: u64| {
+        let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
             if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(a, 1).map(|s| {
-                    // For native backend, all GPU resources created for UAV have the flag
-                    s
-                })
+                crate::shadow::find_handle(a, 1).map(|s| s)
             } else {
-                crate::shadow::find(a, 1).map(Into::into)
+                crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
             }
         };
         #[cfg(not(all(windows, feature = "native-memory")))]
-        let find = |a: u64| {
-            crate::shadow::find(a, 1).map(Into::into)
+        let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
+            crate::shadow::find(a, 1).map(ShadowHandle)
         };
         let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);
@@ -1898,8 +1895,8 @@ impl State {
                 (index, shadow)
             }
         };
-        if let Some((a, s)) = &shadow {
-            ready(*a, s);
+        if let Some(s) = &shadow {
+            ready(address.unwrap_or(0), s);
         }
         let handle = host.gpu_handle(index);
         // SAFETY: an open list; the slot is in the bound view heap.
@@ -1990,8 +1987,8 @@ impl State {
         // As for root descriptors (`root_view`): all that is left of the
         // buffer is brought up to date. The first 1 MiB only left what lay
         // past it stale (most mesh vertex streams reach further).
-        if let Some((a, s)) = &shadow {
-            s.refresh(list, *a, s.left(*a));
+        if let Some(s) = &shadow {
+            s.refresh(list, address.unwrap_or(0), s.left(address.unwrap_or(0)));
         }
         let handle = host.gpu_handle(index);
         // SAFETY: an open list; the slot is in the bound view heap.

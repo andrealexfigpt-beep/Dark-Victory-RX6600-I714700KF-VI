@@ -659,25 +659,28 @@ impl HostPipeline {
             crate::host::name(&pso, || format!("{shaders:?}"));
 
             // Record pipeline-shader permutations for ahead-of-time compilation
-            let pipeline_key = name.to_string();
-            for (shader, _) in &stages {
-                if let Some(translated) = shader.translated() {
-                    let container = &shader.container;
-                    let tf = victory_shader::emit::translation_fingerprint();
-                    let rs_hash = compute_root_signature_hash(&translated.host);
-                    let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
-                    use blake3::Hasher;
-                    let container_hash = blake3::hash(container).as_bytes().clone();
-                    let key = crate::shader_perm::ShaderPermutationKey::from_shader(
-                        perm_key,
-                        container,
-                        tf,
-                        rs_hash,
-                        false,
-                        false,
-                    );
-                    crate::shader_perm::record_pipeline_shader(pipeline_key.clone(), key.clone());
-                    crate::shader_perm::mark_pso_created(&key);
+            #[cfg(feature = "native-memory")]
+            {
+                let pipeline_key = name.to_string();
+                for (shader, _) in &stages {
+                    if let Some(translated) = shader.translated() {
+                        let container = &shader.container;
+                        let tf = victory_shader::emit::translation_fingerprint();
+                        let rs_hash = compute_root_signature_hash(&translated.host);
+                        let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
+                        use blake3::Hasher;
+                        let container_hash = blake3::hash(container).as_bytes().clone();
+                        let key = crate::shader_perm::ShaderPermutationKey::from_shader(
+                            perm_key,
+                            container,
+                            tf,
+                            rs_hash,
+                            false,
+                            false,
+                        );
+                        crate::shader_perm::record_pipeline_shader(pipeline_key.clone(), key.clone());
+                        crate::shader_perm::mark_pso_created(&key);
+                    }
                 }
             }
 
@@ -851,25 +854,28 @@ impl HostPipeline {
         crate::host::name(&pso, || format!("{shaders:?}"));
 
         // Record pipeline-shader permutations for ahead-of-time compilation
-        let pipeline_key = name(rect_gs.as_ref()).to_string();
-        for (shader, _) in &stages {
-            if let Some(translated) = shader.translated() {
-                let container = &shader.container;
-                let tf = victory_shader::emit::translation_fingerprint();
-                let rs_hash = compute_root_signature_hash(&translated.host);
-                let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
-                use blake3::Hasher;
-                let container_hash = blake3::hash(container).as_bytes().clone();
-                let key = crate::shader_perm::ShaderPermutationKey::from_shader(
-                    perm_key,
-                    container,
-                    tf,
-                    rs_hash,
-                    false,
-                    false,
-                );
-                crate::shader_perm::record_pipeline_shader(pipeline_key.clone(), key.clone());
-                crate::shader_perm::mark_pso_created(&key);
+        #[cfg(feature = "native-memory")]
+        {
+            let pipeline_key = name(rect_gs.as_ref()).to_string();
+            for (shader, _) in &stages {
+                if let Some(translated) = shader.translated() {
+                    let container = &shader.container;
+                    let tf = victory_shader::emit::translation_fingerprint();
+                    let rs_hash = compute_root_signature_hash(&translated.host);
+                    let perm_key = match shader.stage { "vs" | "VS" | "vertex" => victory_shader::native::HwStage::Vs, "ps" | "PS" | "pixel" => victory_shader::native::HwStage::Ps, "cs" | "CS" | "compute" => victory_shader::native::HwStage::Cs, "ms" | "MS" | "mesh" => victory_shader::native::HwStage::Ms, _ => victory_shader::native::HwStage::Cs };
+                    use blake3::Hasher;
+                    let container_hash = blake3::hash(container).as_bytes().clone();
+                    let key = crate::shader_perm::ShaderPermutationKey::from_shader(
+                        perm_key,
+                        container,
+                        tf,
+                        rs_hash,
+                        false,
+                        false,
+                    );
+                    crate::shader_perm::record_pipeline_shader(pipeline_key.clone(), key.clone());
+                    crate::shader_perm::mark_pso_created(&key);
+                }
             }
         }
 
