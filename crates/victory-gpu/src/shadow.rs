@@ -26,95 +26,18 @@ use crate::watch::PAGE;
 
 /// Unified shadow handle that works with both legacy and native backends.
 /// Provides a common API for GPU VA lookup, refresh, and GPU write tracking.
-#[cfg(all(windows, feature = "native-memory"))]
 #[derive(Clone)]
 pub enum ShadowHandle {
     Legacy(Arc<Shadow>),
     Native(Arc<crate::native_mem::NativeShadow>),
 }
 
-#[cfg(all(windows, not(feature = "native-memory")))]
-#[derive(Clone)]
-pub struct ShadowHandle(pub Arc<Shadow>);
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-impl ShadowHandle {
-    /// Get the GPU virtual address for a title address.
-    pub fn gpu(&self, address: u64) -> u64 {
-        self.0.gpu(address)
-    }
-
-    /// The title memory the copy is of: its start and length.
-    pub fn span(&self) -> (u64, u64) {
-        self.0.span()
-    }
-
-    /// The offset of a title address in the copy, if it lies in it.
-    pub fn offset_in(&self, address: u64) -> Option<u64> {
-        self.0.offset_in(address)
-    }
-
-    /// Bytes from a title address to the buffer's end.
-    pub fn left(&self, address: u64) -> u64 {
-        self.0.left(address)
-    }
-
-    /// Bring `len` bytes at `address` up to date when `list` is submitted.
-    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
-        self.0.refresh(list, address, len)
-    }
-
-    /// Shaders of `list` may write `[address, address + len)` of the copy.
-    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
-        self.0.gpu_writes(list, address, len)
-    }
-
-    /// Whether the memory behind the copy turned out not to be write-watched.
-    pub fn unwatched(&self) -> bool {
-        self.0.unwatched()
-    }
-
-    /// Claim this copy's full refresh even when several heaps view it.
-    pub fn take_unwatched_refresh(&self, frame: u64) -> bool {
-        self.0.take_unwatched_refresh(frame)
-    }
-
-    /// Get the underlying D3D12 resource for descriptor creation.
-    pub fn resource(&self) -> &ID3D12Resource {
-        &self.0.buffer
-    }
-
-    /// Offset of a title address from the buffer's start (legacy only, for view_home).
-    pub fn offset(&self, address: u64) -> u64 {
-        self.0.offset(address)
-    }
-
-    /// Compare pointer equality of the inner Arc.
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
-    }
-
-    /// The bytes of the host buffer (resource width).
-    pub fn width(&self) -> u64 {
-        self.0.width()
-    }
-}
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-impl From<Arc<Shadow>> for ShadowHandle {
-    fn from(s: Arc<Shadow>) -> Self {
-        ShadowHandle(s)
-    }
-}
-
-#[cfg(all(windows, feature = "native-memory"))]
 impl From<Arc<Shadow>> for ShadowHandle {
     fn from(s: Arc<Shadow>) -> Self {
         ShadowHandle::Legacy(s)
     }
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 impl ShadowHandle {
     /// Get the GPU virtual address for a title address.
     pub fn gpu(&self, address: u64) -> u64 {
