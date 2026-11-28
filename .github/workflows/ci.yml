@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, native-memory-v1, native-final-v1, windows-fix-v2]
 
 permissions:
   contents: read
@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       # The version and components pinned in rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -31,3 +31,35 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
+
+  native-memory:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with native-memory and diagnostics
+        run: cargo build --workspace --features "native-memory,diagnostics" --locked
+      - name: Run native memory tests
+        run: cargo test --workspace --features "native-memory,diagnostics" --locked native_mem
+      - name: Run all tests with native backend
+        run: cargo test --workspace --features "native-memory,diagnostics" --locked
+      - name: Run native memory benchmarks
+        run: cargo test --workspace --features "native-memory,diagnostics" --locked benchmarks -- --nocapture
+      - name: Build victory diagnostic executable
+        run: cargo build --locked --profile diag -p victory --features "native-memory,diagnostics"
+      - name: Upload victory diagnostic executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: victory-diag-native-memory
+          path: target/diag/victory.exe
+          retention-days: 7
+      - name: Upload required DLLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: victory-diag-runtime
+          path: |
+            target/diag/*.dll
+            target/diag/*.pdb
+          retention-days: 7

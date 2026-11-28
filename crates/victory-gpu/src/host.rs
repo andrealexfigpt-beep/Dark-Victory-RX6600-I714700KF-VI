@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
@@ -59,6 +59,8 @@ pub(crate) struct Host {
     /// The adapter the device is on, for its memory budget
     /// ([`Host::video_memory`]); `None` if the system does not name it.
     adapter: Option<IDXGIAdapter3>,
+    /// Command allocator and list pool for reuse (Phase 3 Native Graphics).
+    command_pool: crate::host::command_pool::CommandPool,
 }
 
 // SAFETY: D3D12 devices, queues, fences and descriptor heaps are
@@ -88,6 +90,14 @@ enum Retired {
 // SAFETY: what is retired is D3D12 objects (free-threaded) and the
 // reference-counted wrappers holding them, dropped once.
 unsafe impl Send for Retired {}
+
+/// Whether the host GPU is RDNA2 (Navi 2x).
+static RDNA2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Check if the host GPU is RDNA2 (Navi 2x).
+pub(crate) fn is_rdna2() -> bool {
+    RDNA2.load(Ordering::Acquire)
+}
 
 /// Milliseconds since the first call.
 pub(crate) fn now_ms() -> u64 {
@@ -436,10 +446,18 @@ fn sweep() {
     crate::book::check();
     let headroom = ram_headroom();
     crate::pool::room(host().and_then(|h| h.video_memory()), headroom, now);
-    crate::shadow::trim_snapshots(headroom);
+    #[cfg(all(windows, feature = "native-memory"))]
+    if !crate::memory_backend::is_native_backend_active() {
+        crate::shadow::trim_snapshots(headroom);
+        crate::shadow::let_go_idle(headroom);
+    }
+    #[cfg(not(all(windows, feature = "native-memory")))]
+    {
+        crate::shadow::trim_snapshots(headroom);
+        crate::shadow::let_go_idle(headroom);
+    }
     send::trim_spare(headroom);
     crate::pipeline::trim_library();
-    crate::shadow::let_go_idle(headroom);
     crate::texture::trim_read_scratch(headroom);
     crate::texture::let_go_idle(headroom);
     crate::resource::let_go_idle();
@@ -822,7 +840,18 @@ pub(crate) fn made_host() -> Option<&'static Host> {
 /// behaves as before: nothing executes).
 pub(crate) fn host() -> Option<&'static Host> {
     HOST.get_or_init(|| match create() {
-        Ok(host) => Some(host),
+        Ok(host) => {
+            // Initialize memory backend after host is created
+            #[cfg(all(windows, feature = "native-memory"))]
+            {
+                let device = Arc::new(host.device.clone());
+                let copy_queue = host.copy_queue();
+                if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
+                    tracing::warn!(error = %e, "failed to initialize memory backend");
+                }
+            }
+            Some(host)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "no host D3D12 device; command lists will not run");
             None
@@ -927,7 +956,43 @@ fn create() -> windows::core::Result<Host> {
             victory_shader::emit::set_host_max_wave(o1.WaveLaneCountMax);
             // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
             let amd = crate::indirect::amd(&device);
-            victory_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);
+            let is_rdna = amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64;
+            victory_shader::emit::set_host_rdna(is_rdna);
+            
+            // Detect RDNA2 (Navi 2x) for specific optimizations.
+            // Navi 2x device IDs: 0x7300-0x73FF (RDNA2).
+            let is_rdna2 = is_rdna && {
+                let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+                if device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS,
+                    (&raw mut options).cast(),
+                    size_of_val(&options) as u32,
+                ).is_ok() {
+                    // Check if it's a Navi 2x GPU
+                    let mut adapter_desc = DXGI_ADAPTER_DESC1::default();
+                    if let Ok(factory) = unsafe { CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0)) } {
+                        if let Ok(adapter) = factory.EnumAdapterByLuid::<IDXGIAdapter1>(device.GetAdapterLuid()) {
+                            if adapter.GetDesc1().is_ok_and(|d| {
+                                d.VendorId == 0x1002 && d.DeviceId >= 0x7300 && d.DeviceId <= 0x73FF
+                            }) {
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            RDNA2.store(is_rdna2, Ordering::Relaxed);
+            if is_rdna2 {
+                tracing::info!("RDNA2 (Navi 2x) detected - enabling Navi 2x optimizations");
+            }
         }
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
@@ -956,6 +1021,25 @@ fn create() -> windows::core::Result<Host> {
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
         tracing::info!("host D3D12 device ready");
+        
+        // Initialize binding configuration (Phase 3 Native Graphics).
+        crate::host::binding::set_binding_config(crate::host::binding::BindingConfig::native_default());
+        
+        // Initialize descriptor heap pools (Phase 3 Native Graphics).
+        crate::host::descriptor_pool::init_descriptor_pools(&device)?;
+        
+        // Initialize command pool (Phase 3 Native Graphics).
+        let command_pool = crate::host::command_pool::CommandPool::new(&device)?;
+        
+        // Initialize barrier tracker (Phase 3 Native Graphics).
+        crate::host::barrier::init_barrier_tracker();
+        
+        // Initialize async queue manager (Phase 3 Native Graphics).
+        crate::host::queue::init_queue_manager(&device)?;
+        
+        // Initialize budget-aware memory manager (Phase 3 Native Graphics).
+        crate::host::memory_mgr::init_memory_manager(&device, adapter.clone());
+        
         Ok(Host {
             device,
             queue,
@@ -972,6 +1056,7 @@ fn create() -> windows::core::Result<Host> {
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
             adapter,
+            command_pool,
         })
     }
 }
@@ -982,6 +1067,11 @@ impl Host {
         let adapter = self.adapter.as_ref();
         // SAFETY: a plain query.
         adapter.map_or(0, |a| unsafe { a.CheckInterfaceSupport(&IDXGIDevice::IID) }.unwrap_or(0))
+    }
+
+    /// Get the command pool for allocator/list reuse (Phase 3 Native Graphics).
+    pub(crate) fn command_pool(&self) -> &crate::host::command_pool::CommandPool {
+        &self.command_pool
     }
 }
 
@@ -4141,6 +4231,12 @@ mod torn;
 #[cfg(feature = "diagnostics")]
 mod traffic;
 pub(crate) mod upcheck;
+pub(crate) mod command_pool;
+pub(crate) mod descriptor_pool;
+pub(crate) mod binding;
+pub(crate) mod barrier;
+pub(crate) mod queue;
+pub(crate) mod memory_mgr;
 #[cfg(feature = "diagnostics")]
 mod stamps;
 #[cfg(feature = "diagnostics")]
@@ -4462,7 +4558,13 @@ impl Host {
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         let before = private_bytes();
-        let list = self.make_list();
+        
+        // Use command pool for allocator reuse (Phase 3 Native Graphics).
+        let pooled_alloc = self.command_pool().get_direct_allocator()?;
+        let list = pooled_alloc.create_list()?;
+        
+        let host_list = self.make_host_list(pooled_alloc.allocator().clone(), list)?;
+        
         LISTS[0].fetch_add(1, Ordering::Relaxed);
         // (May shrink while a list is made, on another thread's account:
         // added as it is, the sum is what counts.)
@@ -4474,7 +4576,7 @@ impl Host {
             add(C::HostLists, 1);
             add(C::HostListNs, started.elapsed().as_nanos() as u64);
         }
-        list
+        Ok(host_list)
     }
 
     /// An allocator and a closed list for a prelude.
@@ -4502,65 +4604,48 @@ impl Host {
     }
 
     fn make_list(&self) -> windows::core::Result<HostList> {
-        // SAFETY: plain object creation.
-        unsafe {
-            let allocator: ID3D12CommandAllocator = self
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
-            let list: ID3D12GraphicsCommandList = self.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &allocator,
-                None,
-            )?;
-            #[cfg(feature = "diagnostics")]
-            pass_begin(&list);
-            #[cfg(feature = "diagnostics")]
-            let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
-            let pipelines = std::sync::Arc::<Mutex<std::collections::BTreeSet<String>>>::default();
-            #[cfg(feature = "diagnostics")]
-            let indirects = indirects::Shared::default();
-            #[cfg(feature = "diagnostics")]
-            if dred_on() || dred_light() {
-                static NUMBER: AtomicU32 = AtomicU32::new(0);
-                let number = NUMBER.fetch_add(1, Ordering::Relaxed);
-                name(&list, || format!("victory host list {number}"));
-                let mut all = LIST_NOTES.lock().unwrap_or_else(|e| e.into_inner());
-                if number.is_multiple_of(256) {
-                    all.retain(|_, l| l.0.strong_count() > 0);
-                }
-                all.insert(
-                    number,
-                    (
-                        std::sync::Arc::downgrade(&notes),
-                        std::sync::Arc::downgrade(&pipelines),
-                        std::sync::Arc::downgrade(&indirects),
-                    ),
-                );
+        // Use command pool for allocator reuse (Phase 3 Native Graphics).
+        let pooled_alloc = self.command_pool().get_direct_allocator()?;
+        let list = pooled_alloc.create_list()?;
+        
+        #[cfg(feature = "diagnostics")]
+        if dred_on() || dred_light() {
+            static NUMBER: AtomicU32 = AtomicU32::new(0);
+            let number = NUMBER.fetch_add(1, Ordering::Relaxed);
+            name(&list, || format!("victory host list {number}"));
+            let mut all = LIST_NOTES.lock().unwrap_or_else(|e| e.into_inner());
+            if number.is_multiple_of(256) {
+                all.retain(|_, l| l.0.strong_count() > 0);
             }
-            Ok(HostList {
-                allocator,
-                list,
-                deferred: Mutex::default(),
-                scratch: Mutex::default(),
-                states: Mutex::default(),
-                twins: Mutex::default(),
-                pipelines,
-                #[cfg(feature = "diagnostics")]
-                indirects,
-                budget: OnceLock::new(),
-                card_budget: OnceLock::new(),
-                indirect_args: Mutex::default(),
-                batch_args: Mutex::default(),
-                coming: Mutex::default(),
-                epoch: std::sync::atomic::AtomicU64::new(next_epoch()),
-                _alive: Counted::new(),
-                #[cfg(feature = "diagnostics")]
-                notes,
-                #[cfg(feature = "diagnostics")]
-                stamps: OnceLock::new(),
-            })
         }
+        
+        self.make_host_list(pooled_alloc.allocator().clone(), list)
+    }
+
+    /// Common HostList construction from allocator and list.
+    fn make_host_list(&self, allocator: ID3D12CommandAllocator, list: ID3D12GraphicsCommandList) -> windows::core::Result<HostList> {
+        Ok(HostList {
+            allocator,
+            list,
+            deferred: Mutex::default(),
+            scratch: Mutex::default(),
+            states: Mutex::default(),
+            twins: Mutex::default(),
+            pipelines: std::sync::Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+            #[cfg(feature = "diagnostics")]
+            indirects: indirects::Shared::default(),
+            budget: OnceLock::new(),
+            card_budget: OnceLock::new(),
+            indirect_args: Mutex::default(),
+            batch_args: Mutex::default(),
+            coming: Mutex::default(),
+            epoch: std::sync::atomic::AtomicU64::new(crate::host::next_epoch()),
+            _alive: Counted::new(),
+            #[cfg(feature = "diagnostics")]
+            notes: std::sync::Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "diagnostics")]
+            stamps: OnceLock::new(),
+        })
     }
 
     /// The card's clock ([`CARD_CLOCK_US`]), made at the first send.
@@ -4693,6 +4778,11 @@ impl Host {
     /// (`crate::picked`).
     fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
         use std::sync::Arc;
+        // Skip legacy card buffers when native backend is active
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            return None;
+        }
         if !crate::shadow::cards() {
             return None;
         }
@@ -6039,7 +6129,13 @@ impl Host {
         let behind = late && flying();
         stage.next("submit: gathering what to ask about");
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
-        // The ranges shaders write are counted for it (with the relay).
+        // Skip legacy shadow system when native backend is active
+        #[cfg(all(windows, feature = "native-memory"))]
+        if !crate::memory_backend::is_native_backend_active() {
+            // The ranges shaders write are counted for it (with the relay).
+            crate::shadow::preparing(this_submission);
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
         crate::shadow::preparing(this_submission);
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
@@ -6124,6 +6220,17 @@ impl Host {
         // The snapshots of the ranges shaders may write, if they were left
         // for now (`crate::shadow::wide_back`): the refreshes are done, the
         // lists have not gone to the card.
+        #[cfg(all(windows, feature = "native-memory"))]
+        if !crate::memory_backend::is_native_backend_active() {
+            {
+                #[cfg(feature = "diagnostics")]
+                let snapshots = std::time::Instant::now();
+                crate::shadow::take_snapshots();
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
+            }
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
         {
             #[cfg(feature = "diagnostics")]
             let snapshots = std::time::Instant::now();
@@ -6145,6 +6252,13 @@ impl Host {
         }
         // What shaders may write through views they pick: last, so that no
         // refresh of this submission leaves it alone.
+        #[cfg(all(windows, feature = "native-memory"))]
+        let picked = if crate::memory_backend::is_native_backend_active() {
+            crate::picked::Ranges::default()
+        } else {
+            crate::picked::declare(runs)
+        };
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let picked = crate::picked::declare(runs);
         for (shadow, at, len) in &picked.written {
             shadow.writing(*at, *len);
@@ -6379,6 +6493,11 @@ impl Host {
         // With the relay: nothing is in the air now, so no fetch still to
         // be merged is older than the sends to card copies so far, and
         // their notes can go.
+        #[cfg(all(windows, feature = "native-memory"))]
+        if relay() && !crate::memory_backend::is_native_backend_active() {
+            crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
         if relay() {
             crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
         }
@@ -9017,6 +9136,25 @@ impl Host {
         &self.queue
     }
 
+    /// Get the copy queue for async copy operations (upload/readback).
+    /// Creates it on first use if needed.
+    pub(crate) fn copy_queue(&self) -> Arc<ID3D12CommandQueue> {
+        static COPY_QUEUE: OnceLock<Arc<ID3D12CommandQueue>> = OnceLock::new();
+        COPY_QUEUE.get_or_init(|| {
+            let device = &self.device;
+            let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+                Type: D3D12_COMMAND_LIST_TYPE_COPY,
+                Priority: 0,
+                Flags: D3D12_COMMAND_QUEUE_FLAGS(0),
+                NodeMask: 0,
+            };
+            // SAFETY: plain D3D12 object creation.
+            let queue = unsafe { device.CreateCommandQueue(&queue_desc) }
+                .expect("Failed to create copy queue");
+            Arc::new(queue)
+        }).clone()
+    }
+
     /// A buffer in the upload heap, mapped for writing.
     /// A buffer of `size` bytes the card writes and we read (a read back),
     /// in the state copies into it need.
@@ -9305,6 +9443,11 @@ impl Meter {
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
         self.frames += 1;
+        // Advance memory backend frame counter
+        #[cfg(all(windows, feature = "native-memory"))]
+        if let Some(backend) = crate::memory_backend::memory_backend() {
+            backend.next_frame();
+        }
         #[cfg(feature = "diagnostics")]
         {
             let now = std::time::Instant::now();
@@ -9343,7 +9486,16 @@ impl Meter {
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
         );
-        crate::shadow::exact_line(frames);
+        #[cfg(all(windows, feature = "native-memory"))]
+        if !crate::memory_backend::is_native_backend_active() {
+            crate::shadow::exact_line(frames);
+            crate::shadow::back_line(frames);
+        }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        {
+            crate::shadow::exact_line(frames);
+            crate::shadow::back_line(frames);
+        }
         #[cfg(feature = "diagnostics")]
         crate::resource::scene_dimension_line();
         crate::descriptor::sync_line(frames);
@@ -9354,7 +9506,6 @@ impl Meter {
         card_clock_line(frames, ms);
         #[cfg(feature = "diagnostics")]
         spans::line(frames);
-        crate::shadow::back_line(frames);
         #[cfg(feature = "diagnostics")]
         split_line(frames);
         {
@@ -9408,6 +9559,13 @@ impl Meter {
         // Depth planes drawn from their twins.
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
+        #[cfg(all(windows, feature = "native-memory"))]
+        let card = if crate::memory_backend::is_native_backend_active() {
+            [0u64; 10]
+        } else {
+            crate::shadow::card_stats()
+        };
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let card = crate::shadow::card_stats();
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();

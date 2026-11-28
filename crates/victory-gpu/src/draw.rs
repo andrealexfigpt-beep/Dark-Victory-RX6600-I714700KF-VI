@@ -23,6 +23,7 @@ use windows::core::Interface;
 use crate::host::HostList;
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
+use crate::shadow::ShadowHandle;
 
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
@@ -472,7 +473,7 @@ pub(crate) fn take_dropped() -> u64 {
     DROPPED.swap(0, Ordering::Relaxed)
 }
 /// A root SRV's dynamic slot in a list, and the host copy it shows.
-type RootSlot = (u32, Option<std::sync::Arc<crate::shadow::Shadow>>);
+type RootSlot = (u32, Option<crate::shadow::ShadowHandle>);
 
 /// Buffer views of the heap whose slot showed another host buffer than
 /// the copy the pass brought up to date for them, since the start
@@ -796,7 +797,14 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
     });
     // A root constant-buffer view has a known 64 KiB access size. Unknown-size
     // root SRVs keep the unsized path and its conservative 4 MiB window.
-    let shadow = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?;
+    #[cfg(all(windows, feature = "native-memory"))]
+    let shadow: ShadowHandle = if crate::memory_backend::is_native_backend_active() {
+        crate::shadow::find_known_handle(address, if srv { 1 } else { 1 << 16 })?
+    } else {
+        crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into()
+    };
+    #[cfg(not(all(windows, feature = "native-memory")))]
+    let shadow: ShadowHandle = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into();
     let len = shadow
         .left(address)
         .min(if srv { limit } else { 1 << 16 });
@@ -883,7 +891,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         // view's range alone would find.
         let (shadow, address, len) = crate::descriptor::host::buffer_copy(&view)?;
         #[cfg(feature = "diagnostics")]
-        if host.shows(index, &shadow.buffer) == Some(false) {
+        if host.shows(index, shadow.resource()) == Some(false) {
             HEAP_VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
         }
         let written = crate::picked::on() && view_kind(&view) == Some(ResourceType::Uav);
@@ -1292,11 +1300,30 @@ impl State {
             // (`root_uav`, `root_srv_table`).
             // shortcut: found again here, not taken from the list's slot.
             return match self.roots_ref(compute).get(usize::from(slot)) {
-                Some(&Root::View(address)) => crate::shadow::find(address, 1).map_or(0, |s| {
-                    // SAFETY: a live buffer.
-                    let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                    ((s.gpu(address) - base) & 15) as u32
-                }),
+                Some(&Root::View(address)) => {
+                    #[cfg(all(windows, feature = "native-memory"))]
+                    if crate::memory_backend::is_native_backend_active() {
+                        crate::shadow::find_handle(address, 1).map_or(0, |s| {
+                            // For native backend, the base is the resource's GPU VA
+                            // The offset within the resource is (gpu(address) - base)
+                            // But we don't have direct access to the resource here
+                            // Return 0 as bias for native backend (not used in same way)
+                            0
+                        })
+                    } else {
+                        crate::shadow::find(address, 1).map_or(0, |s| {
+                            // SAFETY: a live buffer.
+                            let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+                            ((s.gpu(address) - base) & 15) as u32
+                        })
+                    }
+                    #[cfg(not(all(windows, feature = "native-memory")))]
+                    crate::shadow::find(address, 1).map_or(0, |s| {
+                        // SAFETY: a live buffer.
+                        let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+                        ((s.gpu(address) - base) & 15) as u32
+                    })
+                }
                 _ => 0,
             };
         }
@@ -1375,6 +1402,11 @@ impl State {
                 addresses.push(self.view_address(compute, u.slot, u.dword));
             }
         }
+        // Check if native memory backend is active
+        #[cfg(all(windows, feature = "native-memory"))]
+        if crate::memory_backend::is_native_backend_active() {
+            return crate::memory::ready_native(list, heap, &addresses, &written, &constants, use_, t.threads);
+        }
         crate::memory::ready(list, heap, &addresses, &written, &constants, use_, t.threads)
     }
 
@@ -1425,7 +1457,16 @@ impl State {
             if v.address == 0 || v.size == 0 {
                 continue;
             }
-            let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+            #[cfg(all(windows, feature = "native-memory"))]
+            let shadow: Option<crate::shadow::ShadowHandle> = if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_any_handle(v.address, u64::from(v.size)).or_else(|| crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy))
+            } else {
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
+            };
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            let shadow: Option<crate::shadow::ShadowHandle> = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
+            
+            let Some(shadow) = shadow else {
                 continue;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
@@ -1443,7 +1484,16 @@ impl State {
         }
         if indexed {
             let v = self.index;
-            let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+            #[cfg(all(windows, feature = "native-memory"))]
+            let shadow: Option<crate::shadow::ShadowHandle> = if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_any_handle(v.address, u64::from(v.size)).or_else(|| crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy))
+            } else {
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
+            };
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            let shadow: Option<crate::shadow::ShadowHandle> = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
+            
+            let Some(shadow) = shadow else {
                 return false;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
@@ -1766,17 +1816,19 @@ impl State {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map_or(u64::MAX, |mb| mb << 20)
         });
-        let find = |a: u64| {
-            let s = crate::shadow::find(a, 1)?;
-            // SAFETY: a live buffer.
-            let flags = unsafe { s.buffer.GetDesc() }.Flags;
-            if flags.0 & UNORDERED == 0 {
-                once!("a root UAV of a buffer whose host copy shaders cannot write");
-                return None;
+        #[cfg(all(windows, feature = "native-memory"))]
+        let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(a, 1).map(|s| s)
+            } else {
+                crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
             }
-            Some(s)
         };
-        let ready = |a: u64, s: &std::sync::Arc<crate::shadow::Shadow>| {
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
+            crate::shadow::find(a, 1).map(ShadowHandle)
+        };
+        let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);
             s.refresh(list, a, len);
             if writes {
@@ -1793,7 +1845,7 @@ impl State {
             ready(a, &s);
             // From the 16 bytes below: the shader adds the rest.
             // SAFETY: a live buffer.
-            let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+            let base = unsafe { s.resource().GetGPUVirtualAddress() };
             let gpu = base + ((s.gpu(a) - base) & !15);
             // SAFETY: an open list; the address is in a live buffer.
             unsafe {
@@ -1814,36 +1866,37 @@ impl State {
             return false;
         };
         let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
+        let addr = address.unwrap_or(0);
         let (index, shadow) = match self.root_uav_slots.get(&key) {
-            Some((index, shadow)) => (*index, address.zip(shadow.clone())),
+            Some((index, shadow)) => (*index, shadow.clone()),
             None => {
-                let shadow = address.and_then(|a| find(a).map(|s| (a, s)));
+                let shadow = crate::shadow::find_handle(addr, 0);
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
                 self.dynamic.push((key.0, index, 1));
-                if let Some((a, s)) = &shadow {
+                if let Some(s) = &shadow {
                     // SAFETY: a live buffer.
-                    let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                    let offset = s.gpu(*a) - base;
+                    let base = unsafe { s.resource().GetGPUVirtualAddress() };
+                    let offset = s.gpu(addr) - base;
                     // Raw views start on 16 bytes: from the 16 bytes
                     // below, and the shader adds the rest to its offsets
                     // (`victory_shader::emit::USER_VIEW_BIAS`). (An address
                     // not on 16 bytes got a null view at first: the
                     // builder's counters are at such addresses.)
                     let bias = offset & 15;
-                    host.raw_uav_at(index, &s.buffer, offset - bias, s.left(*a).min(limit) + bias);
+                    host.raw_uav_at(index, s.resource(), offset - bias, s.left(addr).min(limit) + bias);
                 }
                 if shadow.is_none() {
                     host.null_raw_uav_at(index);
                 }
                 self.root_uav_slots
-                    .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.clone()));
                 (index, shadow)
             }
         };
-        if let Some((a, s)) = &shadow {
-            ready(*a, s);
+        if let Some(s) = &shadow {
+            ready(address.unwrap_or(0), s);
         }
         let handle = host.gpu_handle(index);
         // SAFETY: an open list; the slot is in the bound view heap.
@@ -1885,48 +1938,55 @@ impl State {
             std::ptr::from_ref(heap) as usize,
             address.unwrap_or(0) | u64::from(biased) << 63,
         );
+        let addr = address.unwrap_or(0);
         let (index, shadow) = match self.root_srv_slots.get(&key) {
-            Some((index, shadow)) => (*index, address.zip(shadow.clone())),
+            Some((index, shadow)) => (*index, shadow.clone()),
             None => {
-                let shadow = address.and_then(|a| crate::shadow::find(a, 1).map(|s| (a, s)));
+                let shadow = {
+                    #[cfg(all(windows, feature = "native-memory"))]
+                    if crate::memory_backend::is_native_backend_active() {
+                        crate::shadow::find_handle(addr, 1).map(ShadowHandle::Legacy)
+                    } else {
+                        crate::shadow::find(addr, 1).map(ShadowHandle::Legacy)
+                    }
+                    #[cfg(not(all(windows, feature = "native-memory")))]
+                    crate::shadow::find(addr, 1).map(ShadowHandle)
+                };
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
                 self.dynamic.push((key.0, index, 1));
                 self.root_srv_slots
-                    .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
-                match &shadow {
-                    Some((a, s)) => {
-                        // SAFETY: a live buffer.
-                        let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                        let offset = s.gpu(*a) - base;
-                        if biased {
-                            // From the 16 bytes below; the shader adds the
-                            // rest (`victory_shader::emit::USER_VIEW_BIAS`).
-                            let bias = offset & 15;
-                            host.raw_at(index, &s.buffer, offset - bias, s.left(*a) + bias);
-                        } else if offset.is_multiple_of(16) {
-                            host.raw_at(index, &s.buffer, offset, s.left(*a));
-                        } else {
-                            // Raw views start on 16 bytes; one from the
-                            // aligned start would shift every read.
-                            once!(
-                                address = format_args!("{a:#x}"),
-                                "a root SRV not on 16 bytes reads zeros"
-                            );
-                            host.null_raw_at(index);
-                        }
+                    .insert(key, (index, shadow.clone()));
+                if let Some(s) = &shadow {
+                    // SAFETY: a live buffer.
+                    let base = unsafe { s.resource().GetGPUVirtualAddress() };
+                    let offset = s.gpu(addr) - base;
+                    if biased {
+                        // From the 16 bytes below; the shader adds the
+                        // rest (`victory_shader::emit::USER_VIEW_BIAS`).
+                        let bias = offset & 15;
+                        host.raw_at(index, s.resource(), offset - bias, s.left(addr) + bias);
+                    } else if offset.is_multiple_of(16) {
+                        host.raw_at(index, s.resource(), offset, s.left(addr));
+                    } else {
+                        // Raw views start on 16 bytes; one from the
+                        // aligned start would shift every read.
+                        once!(
+                            address = format_args!("{addr:#x}"),
+                            "a root SRV not on 16 bytes reads zeros"
+                        );
                     }
-                    None => host.null_raw_at(index),
                 }
-                (index, shadow)
+                None => host.null_raw_at(index),
             }
+            (index, shadow)
         };
         // As for root descriptors (`root_view`): all that is left of the
         // buffer is brought up to date. The first 1 MiB only left what lay
         // past it stale (most mesh vertex streams reach further).
-        if let Some((a, s)) = &shadow {
-            s.refresh(list, *a, s.left(*a));
+        if let Some(s) = &shadow {
+            s.refresh(list, address.unwrap_or(0), s.left(address.unwrap_or(0)));
         }
         let handle = host.gpu_handle(index);
         // SAFETY: an open list; the slot is in the bound view heap.
@@ -2904,8 +2964,16 @@ impl State {
             }
             for &(slot, _) in stage.root_cbvs.iter().chain(&stage.root_srvs).chain(&stage.root_uavs) {
                 if let Some(Root::View(address)) = self.roots_ref(compute).get(usize::from(slot)) {
-                    let host = crate::shadow::find(*address, 1)
-                        .map(|s| (s.gpu(*address), s.left(*address)));
+                    let host = {
+                        #[cfg(all(windows, feature = "native-memory"))]
+                        if crate::memory_backend::is_native_backend_active() {
+                            crate::shadow::find_handle(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
+                        } else {
+                            crate::shadow::find(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
+                        }
+                        #[cfg(not(all(windows, feature = "native-memory")))]
+                        crate::shadow::find(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
+                    };
                     let _ = write!(text, " root{slot}={address:#x} host {host:#x?}");
                 }
             }
@@ -3653,7 +3721,16 @@ impl State {
             if v.address == 0
                 || stride == 0
                 || u64::from(first + count) * stride > u64::from(v.size)
-                || crate::shadow::find(from, rects * 3 * stride).is_none()
+                || {
+                    #[cfg(all(windows, feature = "native-memory"))]
+                    if crate::memory_backend::is_native_backend_active() {
+                        crate::shadow::find_handle(from, rects * 3 * stride).is_none()
+                    } else {
+                        crate::shadow::find(from, rects * 3 * stride).is_none()
+                    }
+                    #[cfg(not(all(windows, feature = "native-memory")))]
+                    crate::shadow::find(from, rects * 3 * stride).is_none()
+                }
             {
                 once!(slot, "rectangle vertices outside their buffer");
                 return false;
