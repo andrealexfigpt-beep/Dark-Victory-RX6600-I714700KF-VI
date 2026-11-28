@@ -403,7 +403,7 @@ fn holder(writers: &[Writer], from: usize, to: usize) -> Result<crate::shadow::S
     }
     let shadow = match found {
         Some(s) => s.clone(),
-        None => crate::shadow::find(from as u64, (to - from) as u64).map(crate::shadow::ShadowHandle::Legacy).ok_or("no host copy of it")?,
+        None => return Err("no host copy of it"),
     };
     let (start, len) = shadow.span();
     if shadow.in_place() || (from as u64) < start || to as u64 > start + len {
