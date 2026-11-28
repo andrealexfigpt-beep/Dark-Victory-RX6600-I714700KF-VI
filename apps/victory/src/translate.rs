@@ -1121,7 +1121,7 @@ pub fn pso_precompile(
                 println!("  VS without matching PS (container {:08x})", 
                     u32::from_be_bytes([container_hash[0], container_hash[1], container_hash[2], container_hash[3]]));
             }
-        }
+    }
     }
     
     // Precompile mesh shaders (if any).
@@ -1170,7 +1170,8 @@ pub fn pso_precompile(
                     StencilPassOp: D3D12_STENCIL_OP_KEEP,
                     StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
                 },
-                PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+            },
+            PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
                 NumRenderTargets: 1,
                 RTVFormats: [DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN],
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
@@ -1190,7 +1191,7 @@ pub fn pso_precompile(
                     }
                 }
             }
-        }
+    }
     
     let elapsed = started.elapsed();
     println!(

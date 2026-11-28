@@ -12,6 +12,7 @@ use crate::object::{
     self, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, HRESULT, Iid, Object, S_FALSE, S_OK, Table, This,
     guid, guid_text,
 };
+#[cfg(windows)]
 use crate::{
     descriptor, dxgi, fence, frame, list, pipeline, query, queue, resource, root, signature,
 };
@@ -89,8 +90,14 @@ const LEVEL_IIDS: [Iid; 9] = [
 ];
 
 /// Whether `iid` names the device: its first interface or a newer level.
+#[cfg(windows)]
 pub(crate) fn is_device(iid: *const Iid) -> bool {
     object::is(iid, &[IID]) || object::is(iid, &LEVEL_IIDS)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_device(_iid: *const Iid) -> bool {
+    false
 }
 
 /// The interface version these layouts were checked against (2.4). Both
@@ -100,6 +107,7 @@ pub const CHECKED_VERSION: u32 = 0x0002_0004;
 /// Feature level 12_2, what the console hardware supports.
 const HIGHEST_FEATURE_LEVEL: u32 = 0xc200;
 
+#[cfg(windows)]
 #[repr(C)]
 pub struct Device {
     object: Object,
@@ -109,8 +117,10 @@ pub struct Device {
     /// table. The rest is reserved.
     out_of_line: [u32; 16],
 }
+#[cfg(windows)]
 const _: () = assert!(size_of::<Device>() == 0x58);
 
+#[cfg(windows)]
 /// One device per process, as on the console.
 pub(crate) static DEVICE: Device = Device {
     object: Object::new(&FUNCTIONS),
@@ -118,13 +128,20 @@ pub(crate) static DEVICE: Device = Device {
     out_of_line: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 };
 
+#[cfg(windows)]
 pub(crate) fn device() -> This {
     (&raw const DEVICE).cast()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn device() -> This {
+    std::ptr::null_mut()
 }
 
 /// Device creation: `(adapter, parameters, iid, out)`. The parameters start
 /// with the interface version; the rest (ring and scratch sizes, features
 /// to leave out) does not matter to us yet.
+#[cfg(windows)]
 pub extern "system" fn create(
     _adapter: *const c_void,
     parameters: *const u32,
@@ -156,19 +173,37 @@ pub extern "system" fn create(
     object::answer(object::DEVICE, iid, Some(device()), out)
 }
 
+#[cfg(not(windows))]
+pub extern "system" fn create(
+    _adapter: *const c_void,
+    _parameters: *const u32,
+    _iid: *const Iid,
+    _out: *mut This,
+) -> HRESULT {
+    E_NOTIMPL
+}
+
 /// Set when the title creates the device as `ID3D12Device11`. Its lists and
 /// queues then have the newer layouts (two more methods each; see
 /// `list` and `queue`), although the interface version stays 2.4.
 /// shortcut: the creation interface is the only sign of the newer layouts
 /// we have (the title, April 2026, versus Minecraft, March 2022);
 /// look for a better one if a title breaks the rule.
+#[cfg(windows)]
 static NEWER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(windows)]
 pub(crate) fn newer() -> bool {
     NEWER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(not(windows))]
+pub(crate) fn newer() -> bool {
+    false
+}
+
 /// The device, or its DXGI side.
+#[cfg(windows)]
 extern "system" fn query_interface(this: This, iid: *const Iid, out: *mut This) -> HRESULT {
     let found = if is_device(iid) {
         Some(this)
@@ -178,6 +213,11 @@ extern "system" fn query_interface(this: This, iid: *const Iid, out: *mut This) 
         None
     };
     object::answer(object::DEVICE, iid, found, out)
+}
+
+#[cfg(not(windows))]
+extern "system" fn query_interface(_this: This, _iid: *const Iid, _out: *mut This) -> HRESULT {
+    E_NOTIMPL
 }
 
 /// What `D3D12ConfigureVirtualMemoryX` takes and fills in.
@@ -197,6 +237,7 @@ const _: () = assert!(size_of::<VirtualMemory>() == 0x20);
 /// `d3d12_xs!D3D12ConfigureVirtualMemoryX`, called before any graphics
 /// allocation. The inputs size console structures we do not have; the
 /// range out is all of user space, since GPU addresses are CPU addresses.
+#[cfg(windows)]
 pub extern "system" fn configure_virtual_memory(config: *mut VirtualMemory) -> HRESULT {
     // SAFETY: the title passes its configuration (null is tolerated).
     let Some(config) = (unsafe { config.as_mut() }) else {
@@ -212,23 +253,35 @@ pub extern "system" fn configure_virtual_memory(config: *mut VirtualMemory) -> H
     S_OK
 }
 
+#[cfg(not(windows))]
+pub extern "system" fn configure_virtual_memory(_config: *mut VirtualMemory) -> HRESULT {
+    E_NOTIMPL
+}
+
+#[cfg(windows)]
 fn user_space() -> (u64, u64) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
-        // SAFETY: plain data, filled in by the call.
-        let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
-        // SAFETY: a valid out pointer.
-        unsafe { GetSystemInfo(&mut info) };
-        (
-            info.lpMinimumApplicationAddress as u64,
-            info.lpMaximumApplicationAddress as u64,
-        )
-    }
-    #[cfg(not(windows))]
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+    // SAFETY: plain data, filled in by the call.
+    let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid out pointer.
+    unsafe { GetSystemInfo(&mut info) };
+    (
+        info.lpMinimumApplicationAddress as u64,
+        info.lpMaximumApplicationAddress as u64,
+    )
+}
+
+#[cfg(not(windows))]
+fn user_space() -> (u64, u64) {
     (0x1_0000, 0x7fff_fffe_ffff)
 }
 
+#[cfg(windows)]
+extern "system" fn node_count(_: This) -> u32 {
+    1
+}
+
+#[cfg(not(windows))]
 extern "system" fn node_count(_: This) -> u32 {
     1
 }
@@ -262,6 +315,7 @@ const OPTIONS: [u32; 16] = [
     2,  // resource heap tier
 ];
 
+#[cfg(windows)]
 extern "system" fn check_feature_support(
     _: This,
     feature: u32,
@@ -324,6 +378,7 @@ extern "system" fn check_feature_support(
     }
 }
 
+#[cfg(windows)]
 fn feature_levels(data: *mut c_void) -> HRESULT {
     // SAFETY: the caller checked size and non-null.
     let query = unsafe { &mut *data.cast::<FeatureLevels>() };
@@ -356,6 +411,7 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
 /// methods can be written.
 /// shortcut: not implemented. Answering `S_OK` here without making the
 /// pipeline would hand the title whatever its stack held as an object.
+#[cfg(windows)]
 extern "system" fn unknown_pipeline<const SLOT: usize>(
     _: This,
     desc: *const u8,
@@ -401,8 +457,8 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
 
 /// The host device's state: the console's device is removed when the host's is
 /// (VIctory 13185f5: the default answer, E_NOTIMPL, reads as a lost device).
+#[cfg(windows)]
 extern "system" fn removed_reason(_: This) -> HRESULT {
-    #[cfg(windows)]
     if let Some(host) = crate::host::host() {
         // SAFETY: a plain query.
         if let Err(e) = unsafe { host.device.GetDeviceRemovedReason() } {
@@ -412,11 +468,17 @@ extern "system" fn removed_reason(_: This) -> HRESULT {
     S_OK
 }
 
+#[cfg(not(windows))]
+extern "system" fn removed_reason(_: This) -> HRESULT {
+    S_OK
+}
+
 /// IUnknown 3, object methods 4, device methods 76 (0x18-0x290), then the
 /// methods `ID3D12Device1` to `ID3D12Device8` add, in order: 3, 1, 3, 6, 9,
 /// 1, 2, 9 (0x298-0x3a0, the console's own among them), then those of
 /// `ID3D12Device9` to `ID3D12Device11`, whose console layout is unknown.
 /// Every slot exists so that a call to one we have not written logs it.
+#[cfg(windows)]
 static FUNCTIONS: Table<160> = {
     let mut f = object::d3d12_object(object::missing_table::<{ object::DEVICE }, 160>());
     f[0] = query_interface as *const (); // 0x00

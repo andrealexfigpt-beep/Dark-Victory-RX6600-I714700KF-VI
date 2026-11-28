@@ -25,9 +25,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    display, speech, storage, xasync, xgame, xgamesave, xgameui, xnetworking, xpackage, xstore,
+    display, speech, storage, xasync, xgame, xgamesave, xnetworking, xpackage, xstore,
     xsystem, xuser,
 };
+#[cfg(windows)]
+use super::xgameui;
 use crate::{HleModule, hle_export};
 
 pub type HRESULT = i32;
@@ -108,6 +110,7 @@ const AREAS: &[&[Interface]] = &[
     display::INTERFACES,
     xgamesave::INTERFACES,
     xstore::INTERFACES,
+    #[cfg(windows)]
     xgameui::INTERFACES,
     speech::INTERFACES,
 ];
@@ -230,7 +233,7 @@ pub extern "system" fn QueryApiImpl(
     else {
         return NOT_SUPPORTED;
     };
-    #[cfg(feature = "diagnostics")]
+    #[cfg(all(windows, feature = "diagnostics"))]
     if tracing::enabled!(tracing::Level::DEBUG) {
         // Each runtime call site once: which title code uses which area, when.
         static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());

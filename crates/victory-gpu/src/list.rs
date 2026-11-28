@@ -1998,6 +1998,7 @@ impl ValueWait {
     /// 36-49: "between its submissions ... kernel"; 47 of 110 looks at
     /// that thread in run 49 found it in this question).
     /// `VICTORY_WAIT_ASK=1` asks first, as before.
+    #[cfg(windows)]
     pub(crate) fn met(&self) -> bool {
         #[cfg(all(windows, feature = "diagnostics"))]
         let started = std::time::Instant::now();
@@ -2011,6 +2012,13 @@ impl ValueWait {
         met
     }
 
+    #[cfg(not(windows))]
+    pub(crate) fn met(&self) -> bool {
+        // On non-Windows, assume the wait is met (no GPU synchronization)
+        true
+    }
+
+    #[cfg(windows)]
     fn holds(&self) -> bool {
         let bytes = if self.wide { 8 } else { 4 };
         if self.address == 0 {
