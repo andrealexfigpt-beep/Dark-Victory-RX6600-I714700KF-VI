@@ -3523,8 +3523,6 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
-}
-
 /// [`buffer_range`] of an unordered access view of memory at `base`.
 fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     let desc = uav_desc(words);
