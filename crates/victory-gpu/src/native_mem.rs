@@ -19,11 +19,11 @@ use std::ptr;
 
 use dashmap::DashMap;
 use tracing::{debug, info, warn};
-use windows::Win32::Foundation::{HANDLE, CloseHandle, WAIT_OBJECT_0, INFINITE};
+use windows::Win32::Foundation::{HANDLE, CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VIRTUAL_ALLOCATION_TYPE, PAGE_PROTECTION_FLAGS};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 use windows::core::Interface;
 
 use crate::host::{host, Host, HostList};
@@ -87,18 +87,6 @@ impl Drop for NativeMemory {
         if !self.copy_fence_event.is_invalid() {
             unsafe {
                 CloseHandle(self.copy_fence_event);
-            }
-        }
-        // UploadRing and ReadbackRing events are dropped with their structs
-    }
-}
-
-impl Drop for NativeMemory {
-    fn drop(&mut self) {
-        // Close event handles
-        if !self.copy_fence_event.is_invalid() {
-            unsafe {
-                windows::Win32::Foundation::CloseHandle(self.copy_fence_event);
             }
         }
         // UploadRing and ReadbackRing events are dropped with their structs
@@ -904,8 +892,8 @@ impl NativeMemory {
                 VirtualAlloc(
                     aligned_va as *mut _,
                     size as usize,
-                    VIRTUAL_ALLOCATION_TYPE(MEM_RESERVE.0),
-                    PAGE_PROTECTION_FLAGS(PAGE_READWRITE.0),
+                    MEM_RESERVE,
+                    PAGE_READWRITE,
                 )
             };
             if ptr.is_null() {
@@ -931,7 +919,7 @@ impl NativeMemory {
                 VirtualAlloc(
                     aligned_va as *mut _,
                     size as usize,
-                    VIRTUAL_ALLOCATION_TYPE(MEM_RESERVE.0 | MEM_COMMIT.0),
+                    MEM_RESERVE | MEM_COMMIT,
                     PAGE_PROTECTION_FLAGS(protect),
                 )
             };
@@ -1045,9 +1033,9 @@ impl NativeMemory {
                         Flags: flags,
                     };
 
-                    let resource: ID3D12Resource = unsafe {
-                        self.device.CreatePlacedResource(arena.heap(), offset, &desc, D3D12_RESOURCE_STATE_COMMON, None)?
-                    };
+                    let mut resource: Option<ID3D12Resource> = None;
+                    unsafe { self.device.CreatePlacedResource(arena.heap(), offset, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
+                    let resource = resource.unwrap();
 
                     // Get GPU VA
                     let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
@@ -1086,9 +1074,9 @@ impl NativeMemory {
             Flags: flags,
         };
 
-        let resource: ID3D12Resource = unsafe {
-            self.device.CreatePlacedResource(new_arena.heap(), offset, &desc, D3D12_RESOURCE_STATE_COMMON, None)?
-        };
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe { self.device.CreatePlacedResource(new_arena.heap(), offset, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
+        let resource = resource.unwrap();
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
         new_arena.allocations.lock().unwrap().insert(gpu_va, (offset, size));
@@ -1238,7 +1226,7 @@ impl NativeMemory {
             };
             
             let slice_pitch_actual = if slice_pitch > 0 { slice_pitch } else { total_bytes / slices as u64 };
-            let row_pitch_actual = if row_pitch > 0 { row_pitch as u64 } else { footprint_row_pitch };
+            let row_pitch_actual = if row_pitch > 0 { row_pitch as u64 } else { footprint_row_pitch as u64 };
             
             for slice in 0..slices {
                 let slice_src = src_ptr.add((slice as u64 * slice_pitch_actual) as usize);
@@ -1704,9 +1692,9 @@ impl NativeMemory {
                     tex_desc.Flags = flags;
                     tex_desc.Layout = layout;
 
-                    let resource: ID3D12Resource = unsafe {
-                        self.device.CreatePlacedResource(arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None)?
-                    };
+                    let mut resource: Option<ID3D12Resource> = None;
+                    unsafe { self.device.CreatePlacedResource(arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
+                    let resource = resource.unwrap();
 
                     // Get GPU VA
                     let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
@@ -1736,9 +1724,9 @@ impl NativeMemory {
         tex_desc.Flags = flags;
         tex_desc.Layout = layout;
 
-        let resource: ID3D12Resource = unsafe {
-            self.device.CreatePlacedResource(new_arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None)?
-        };
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe { self.device.CreatePlacedResource(new_arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
+        let resource = resource.unwrap();
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
         new_arena.allocations.lock().unwrap().insert(gpu_va, (offset, size));
@@ -1801,9 +1789,9 @@ impl NativeMemory {
             Flags: flags,
         };
 
-        let resource: ID3D12Resource = unsafe {
-            self.device.CreatePlacedResource(heap, heap_offset, &desc, D3D12_RESOURCE_STATE_COMMON, None)?
-        };
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe { self.device.CreatePlacedResource(heap, heap_offset, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
+        let resource = resource.unwrap();
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
@@ -1855,9 +1843,9 @@ impl NativeMemory {
         tex_desc.Flags = flags;
         tex_desc.Layout = layout;
 
-        let resource: ID3D12Resource = unsafe {
-            self.device.CreatePlacedResource(heap, heap_offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None)?
-        };
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe { self.device.CreatePlacedResource(heap, heap_offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }?;
+        let resource = resource.unwrap();
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
 
