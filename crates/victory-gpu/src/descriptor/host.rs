@@ -1342,18 +1342,18 @@ fn view_home(
 
 #[cfg(not(all(windows, feature = "native-memory")))]
 fn view_home(
-    shadow: crate::shadow::ShadowHandle,
+    shadow: std::sync::Arc<crate::shadow::Shadow>,
     start: u64,
     len: u64,
     (stride, raw, format): (u32, bool, u32),
-) -> crate::shadow::ShadowHandle {
+) -> std::sync::Arc<crate::shadow::Shadow> {
     let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset(start)) else {
         return shadow;
     };
     if !view_bytes() {
         return shadow;
     }
-    crate::shadow::exact(start, len).map(ShadowHandle).unwrap_or(shadow)
+    crate::shadow::exact(start, len).unwrap_or(shadow)
 }
 
 /// For device-removed reports: what the slots of the title's view heap that
@@ -5300,7 +5300,13 @@ mod tests {
             let (copy, ..) = buffer_copy(&v).unwrap();
             assert_ne!(copy.span().0, start + off, "its buffer's copy");
             // SAFETY: a live buffer.
-            assert_eq!(width(&v), unsafe { copy.resource().GetDesc() }.Width);
+            let resource = {
+                #[cfg(all(windows, feature = "native-memory"))]
+                { copy.resource() }
+                #[cfg(not(all(windows, feature = "native-memory")))]
+                { &copy.buffer }
+            };
+            assert_eq!(width(&v), unsafe { resource.GetDesc() }.Width);
         }
     }
 

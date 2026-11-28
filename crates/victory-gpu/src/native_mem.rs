@@ -332,6 +332,7 @@ impl GpuArena {
 
         let mut heap: Option<ID3D12Heap> = None;
         unsafe { device.CreateHeap(&desc, &mut heap) }?;
+        let heap = heap.unwrap();
 
         Ok(GpuArena {
             heap,
@@ -389,7 +390,7 @@ impl GpuArena {
         free.push((offset, size));
         free.sort_by_key(|&(o, _)| o);
         // Merge adjacent free blocks
-        let mut merged = Vec::new();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
         for &(o, s) in free.iter() {
             if let Some(last) = merged.last_mut() {
                 if last.0 + last.1 == o {
@@ -459,6 +460,7 @@ impl UploadRing {
 
         let mut resource: Option<ID3D12Resource> = None;
         unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None, &mut resource) }?;
+        let resource = resource.unwrap();
 
         // Map the resource for CPU writes
         let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
@@ -632,6 +634,7 @@ impl ReadbackRing {
 
         let mut resource: Option<ID3D12Resource> = None;
         unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut resource) }?;
+        let resource = resource.unwrap();
 
         let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
         unsafe {
