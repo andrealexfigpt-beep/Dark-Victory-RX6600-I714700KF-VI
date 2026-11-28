@@ -1319,7 +1319,6 @@ fn view_bytes() -> bool {
 
 /// The copy the buffer view of `[start, start + len)` is made on: `shadow`, the one
 /// its buffer has, or one of the view's own bytes ([`off_elements`]).
-#[cfg(all(windows, feature = "native-memory"))]
 fn view_home(
     shadow: crate::shadow::ShadowHandle,
     start: u64,
@@ -1338,22 +1337,6 @@ fn view_home(
     }
     // For native backend, we can't create exact shadows; return the original
     shadow
-}
-
-#[cfg(not(all(windows, feature = "native-memory")))]
-fn view_home(
-    shadow: std::sync::Arc<crate::shadow::Shadow>,
-    start: u64,
-    len: u64,
-    (stride, raw, format): (u32, bool, u32),
-) -> std::sync::Arc<crate::shadow::Shadow> {
-    let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset(start)) else {
-        return shadow;
-    };
-    if !view_bytes() {
-        return shadow;
-    }
-    crate::shadow::exact(start, len).unwrap_or(shadow)
 }
 
 /// For device-removed reports: what the slots of the title's view heap that
@@ -3522,7 +3505,6 @@ fn view_extent() -> bool {
 /// part's one), and for buffer objects, a part that also lies in a smaller
 /// buffer object. The slot then showed a copy nothing brought up to date,
 /// and what shaders wrote through it was looked for in the other copy.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
@@ -3533,43 +3515,14 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
         // (The console is lax: a view may begin past its buffer's end.)
         && address >= base
         && address - base < width.max(1)
-        && let Some(shadow) = {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(base, width)
-            } else {
-                crate::shadow::find(base, width).map(ShadowHandle::Legacy)
-            }
-        }
+        && let Some(shadow) = crate::shadow::find_handle(base, width)
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
-    let shadow = if crate::memory_backend::is_native_backend_active() {
-        crate::shadow::find_handle(address, len)
-    } else {
-        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
-    }?;
+    let shadow = crate::shadow::find_handle(address, len)?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
-#[cfg(not(all(windows, feature = "native-memory")))]
-pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
-    let (address, len) = buffer_range(view)?;
-    if len == 0 {
-        return None;
-    }
-    if view_extent()
-        && let Some((base, width)) = buffer_extent(view)
-        // (The console is lax: a view may begin past its buffer's end.)
-        && address >= base
-        && address - base < width.max(1)
-        && let Some(shadow) = {
-            crate::shadow::find(base, width)
-        }
-    {
-        return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
-    }
-    let shadow = crate::shadow::find(address, len)?;
-    Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
 /// [`buffer_range`] of an unordered access view of memory at `base`.
@@ -3722,18 +3675,7 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow: crate::shadow::ShadowHandle = {
-        #[cfg(all(windows, feature = "native-memory"))]
-        {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
-            } else {
-                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
-            }
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(ShadowHandle).unwrap()
-    };
+    let mut shadow: crate::shadow::ShadowHandle = crate::shadow::find_handle(address, len).unwrap();
     let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
     // SAFETY: a buffer view's union member.
@@ -3840,18 +3782,7 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow: crate::shadow::ShadowHandle = {
-        #[cfg(all(windows, feature = "native-memory"))]
-        {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
-            } else {
-                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
-            }
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(ShadowHandle).unwrap()
-    };
+    let mut shadow: crate::shadow::ShadowHandle = crate::shadow::find_handle(address, len).unwrap();
     let unit = {
         // SAFETY: a buffer view's union member.
         let b = unsafe { desc.Anonymous.Buffer };
@@ -5300,12 +5231,7 @@ mod tests {
             let (copy, ..) = buffer_copy(&v).unwrap();
             assert_ne!(copy.span().0, start + off, "its buffer's copy");
             // SAFETY: a live buffer.
-            let resource = {
-                #[cfg(all(windows, feature = "native-memory"))]
-                { copy.resource() }
-                #[cfg(not(all(windows, feature = "native-memory")))]
-                { &copy.buffer }
-            };
+            let resource = copy.resource();
             assert_eq!(width(&v), unsafe { resource.GetDesc() }.Width);
         }
     }

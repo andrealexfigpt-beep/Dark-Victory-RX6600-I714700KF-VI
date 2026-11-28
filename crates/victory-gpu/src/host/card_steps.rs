@@ -5,10 +5,7 @@
 use std::sync::Arc;
 
 use super::*;
-#[cfg(all(windows, feature = "native-memory"))]
 use crate::shadow::ShadowHandle;
-#[cfg(not(all(windows, feature = "native-memory")))]
-use crate::shadow::Shadow;
 
 /// The stage (`VICTORY_CARD_STEPS`; off by default): `1` constant buffers
 /// of descriptor tables (`Step::Fill` with a slot of its own), `2` the
@@ -130,16 +127,8 @@ pub(super) enum FillTo {
 /// Title memory something in the air writes: the host copy it goes through
 /// (`None`: none, the bytes reach title memory when the flight lands), from,
 /// to, and whether it is the destination of a copy done here.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(super) struct Writer {
     shadow: Option<crate::shadow::ShadowHandle>,
-    from: usize,
-    to: usize,
-    copy: bool,
-}
-#[cfg(not(all(windows, feature = "native-memory")))]
-pub(super) struct Writer {
-    shadow: Option<std::sync::Arc<crate::shadow::Shadow>>,
     from: usize,
     to: usize,
     copy: bool,
@@ -151,16 +140,6 @@ pub(super) fn writers(items: &[Late]) -> Vec<Writer> {
     for item in items {
         match item {
             Late::Run(flight) => {
-                #[cfg(all(windows, feature = "native-memory"))]
-                for (shadow, ranges) in &flight.back {
-                    out.extend(ranges.iter().map(|&(from, to)| Writer {
-                        shadow: Some(shadow.clone()),
-                        from,
-                        to,
-                        copy: false,
-                    }));
-                }
-                #[cfg(not(all(windows, feature = "native-memory")))]
                 for (shadow, ranges) in &flight.back {
                     out.extend(ranges.iter().map(|&(from, to)| Writer {
                         shadow: Some(shadow.clone()),
@@ -411,28 +390,8 @@ fn elsewhere(does: &[Does], shadow: usize, from: usize, to: usize) -> bool {
 /// The host copy that holds `[from, to)` on the card once what `writers`
 /// write is there: the one they all write it through, or without any the
 /// one shaders would be given.
-#[cfg(not(all(windows, feature = "native-memory")))]
-fn holder(writers: &[Writer], from: usize, to: usize) -> Result<std::sync::Arc<crate::shadow::Shadow>, &'static str> {
-    let mut found: Option<&std::sync::Arc<crate::shadow::Shadow>> = None;
-    for w in writers.iter().filter(|w| meet((w.from, w.to), (from, to))) {
-        match (&w.shadow, found) {
-            (None, _) => return Err("a read-back or a value behind a flight is written there"),
-            (Some(s), Some(f)) if !Arc::ptr_eq(s, f) => return Err("flights write it through two host copies"),
-            (Some(s), _) => found = Some(s),
-        }
-    }
-    let shadow = match found {
-        Some(s) => s.clone(),
-        None => crate::shadow::find(from as u64, (to - from) as u64).ok_or("no host copy of it")?,
-    };
-    let (start, len) = shadow.span();
-    if shadow.in_place() || (from as u64) < start || to as u64 > start + len {
-        return Err("no host copy holds all of it");
-    }
-    Ok(shadow)
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 fn holder(writers: &[Writer], from: usize, to: usize) -> Result<crate::shadow::ShadowHandle, &'static str> {
     let mut found: Option<&crate::shadow::ShadowHandle> = None;
     for w in writers.iter().filter(|w| meet((w.from, w.to), (from, to))) {
@@ -555,7 +514,6 @@ fn fill_to(runs: &[&HostList], step: (usize, usize)) -> Option<FillTo> {
     }
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 struct Op {
     from: (ShadowHandle, usize),
     len: usize,
@@ -564,29 +522,10 @@ struct Op {
     level: u32,
     to: To,
 }
-#[cfg(not(all(windows, feature = "native-memory")))]
-struct Op {
-    from: (Arc<Shadow>, usize),
-    len: usize,
-    /// Its place in the buffer between.
-    at: u64,
-    level: u32,
-    to: To,
-}
 
-#[cfg(all(windows, feature = "native-memory"))]
 enum To {
     /// A host copy, and the title address.
     Copy(ShadowHandle, usize),
-    /// A descriptor slot (title heap, slot).
-    Slot(usize, u32),
-    /// A buffer's beginning.
-    Buffer(ID3D12Resource),
-}
-#[cfg(not(all(windows, feature = "native-memory")))]
-enum To {
-    /// A host copy, and the title address.
-    Copy(Arc<Shadow>, usize),
     /// A descriptor slot (title heap, slot).
     Slot(usize, u32),
     /// A buffer's beginning.
@@ -674,17 +613,10 @@ static DONE: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::Ato
 /// What [`Host::card_steps`] took off a submission: the list that does it,
 /// for the submission to run first, and the steps the CPU leaves out (their
 /// list by address, their place in it).
-#[cfg(all(windows, feature = "native-memory"))]
 pub(super) struct Taken {
     own: Own,
     steps: std::collections::HashSet<(usize, usize), std::hash::BuildHasherDefault<AddressHash>>,
     copied: Vec<(ShadowHandle, usize, usize)>,
-}
-#[cfg(not(all(windows, feature = "native-memory")))]
-pub(super) struct Taken {
-    own: Own,
-    steps: std::collections::HashSet<(usize, usize), std::hash::BuildHasherDefault<AddressHash>>,
-    copied: Vec<(Arc<Shadow>, usize, usize)>,
 }
 
 impl Taken {
@@ -772,9 +704,6 @@ impl Host {
         let mut places: HashMap<(usize, usize, usize, u32), u64> = HashMap::default();
         // Some 2,800 fills a frame, of a few hundred places: what holds each
         // is looked for once, as long as no copy is added to the writers.
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let mut held: HashMap<(usize, usize), Arc<Shadow>> = HashMap::default();
-        #[cfg(all(windows, feature = "native-memory"))]
         let mut held: HashMap<(usize, usize), ShadowHandle> = HashMap::default();
         let mut room = HashMap::default();
         let mut end = 0u64;
@@ -796,9 +725,6 @@ impl Host {
                     from
                 }
             };
-            #[cfg(not(all(windows, feature = "native-memory")))]
-            let place = (Arc::as_ptr(&from) as usize, src, len, level);
-            #[cfg(all(windows, feature = "native-memory"))]
             let place = (from.as_ptr(), src, len, level);
             let at = match places.get(&place) {
                 Some(&at) => at,
@@ -857,31 +783,17 @@ impl Host {
         // the title's. (One step for each host copy, over all that is read of
         // it: a flush brings a copy up to date from the first range asked for
         // to the last, whatever the steps.)
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let mut spans: ByCopy<(Arc<Shadow>, usize, usize)> = ByCopy::default();
-        #[cfg(all(windows, feature = "native-memory"))]
         let mut spans: ByCopy<(ShadowHandle, usize, usize)> = ByCopy::default();
         for op in &ops {
             let to = match &op.to {
                 To::Copy(to, dst) => Some((to, *dst)),
                 _ => None,
             };
-            #[cfg(not(all(windows, feature = "native-memory")))]
-            for (shadow, at) in std::iter::once((&op.from.0, op.from.1)).chain(to) {
-                let span = spans.entry(Arc::as_ptr(shadow) as usize).or_insert_with(|| (shadow.clone(), at, at + op.len));
-                (span.1, span.2) = (span.1.min(at), span.2.max(at + op.len));
-            }
-            #[cfg(all(windows, feature = "native-memory"))]
             for (shadow, at) in std::iter::once((&op.from.0, op.from.1)).chain(to) {
                 let span = spans.entry(shadow.as_ptr()).or_insert_with(|| (shadow.clone(), at, at + op.len));
                 (span.1, span.2) = (span.1.min(at), span.2.max(at + op.len));
             }
         }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        for (shadow, from, to) in spans.into_values() {
-            shadow.refresh(&own.list, from as u64, (to - from) as u64);
-        }
-        #[cfg(all(windows, feature = "native-memory"))]
         for (shadow, from, to) in spans.into_values() {
             shadow.refresh(&own.list, from as u64, (to - from) as u64);
         }

@@ -9437,11 +9437,6 @@ impl Meter {
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
         );
         // Native backend doesn't use exact_line/back_line
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        {
-            crate::shadow::exact_line(frames);
-            crate::shadow::back_line(frames);
-        }
         #[cfg(feature = "diagnostics")]
         crate::resource::scene_dimension_line();
         crate::descriptor::sync_line(frames);
@@ -9507,8 +9502,8 @@ impl Meter {
         // Copies in the card's memory (`crate::shadow::cards`).
         // Native backend doesn't use card stats
         let card = [0u64; 10];
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let card = crate::shadow::card_stats();
+        // Native backend doesn't use card stats
+        // let card = crate::shadow::card_stats();
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
         // Over the same frames as the counts above.

@@ -1,6 +1,5 @@
 //! Integration tests for the unified native runtime.
 
-#[cfg(all(windows, feature = "native-memory"))]
 mod native_runtime_integration_tests {
     use std::time::Duration;
 

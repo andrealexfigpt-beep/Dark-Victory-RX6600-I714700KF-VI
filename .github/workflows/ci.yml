@@ -18,7 +18,7 @@ env:
 jobs:
   check:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       # The version and components pinned in rust-toolchain.toml.
@@ -31,28 +31,16 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
-
-  native-memory:
-    runs-on: windows-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
       - name: Build with diagnostics
         run: cargo build --workspace --features diagnostics --locked
-      - name: Run native memory tests
-        run: cargo test --workspace --features diagnostics --locked native_mem
-      - name: Run all tests with native backend
+      - name: Run all tests with diagnostics
         run: cargo test --workspace --features diagnostics --locked
-      - name: Run native memory benchmarks
-        run: cargo test --workspace --features diagnostics --locked benchmarks -- --nocapture
       - name: Build victory diagnostic executable
         run: cargo build --locked --profile diag -p victory --features diagnostics
       - name: Upload victory diagnostic executable
         uses: actions/upload-artifact@v4
         with:
-          name: victory-diag-native-memory
+          name: victory-diag
           path: target/diag/victory.exe
           retention-days: 7
       - name: Upload required DLLs

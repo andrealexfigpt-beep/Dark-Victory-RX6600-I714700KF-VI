@@ -659,7 +659,6 @@ impl HostPipeline {
             crate::host::name(&pso, || format!("{shaders:?}"));
 
             // Record pipeline-shader permutations for ahead-of-time compilation
-            #[cfg(feature = "native-memory")]
             {
                 let pipeline_key = name.to_string();
                 for (shader, _) in &stages {
@@ -854,7 +853,6 @@ impl HostPipeline {
         crate::host::name(&pso, || format!("{shaders:?}"));
 
         // Record pipeline-shader permutations for ahead-of-time compilation
-        #[cfg(feature = "native-memory")]
         {
             let pipeline_key = name(rect_gs.as_ref()).to_string();
             for (shader, _) in &stages {

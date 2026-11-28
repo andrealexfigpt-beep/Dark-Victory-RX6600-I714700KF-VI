@@ -385,7 +385,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(all(windows, feature = "native-memory"))]
     fn test_descriptor_pool_basic() {
         let host = host().expect("Failed to get host");
         

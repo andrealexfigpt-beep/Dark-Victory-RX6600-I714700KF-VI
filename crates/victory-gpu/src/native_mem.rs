@@ -1966,7 +1966,6 @@ pub fn is_native_memory_active() -> bool {
 
 /// A native backend shadow handle that mimics the Shadow API for the native path.
 /// Used as a drop-in replacement for Arc<Shadow> when native backend is active.
-#[cfg(all(windows, feature = "native-memory"))]
 pub struct NativeShadow {
     /// The native memory backend.
     backend: Arc<NativeMemory>,
@@ -1982,7 +1981,6 @@ pub struct NativeShadow {
     uav: bool,
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 impl NativeShadow {
     /// Create a new NativeShadow for a title VA range.
     pub fn new(backend: Arc<NativeMemory>, title_va: u64, len: u64, uav: bool) -> anyhow::Result<Arc<Self>> {

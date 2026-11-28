@@ -509,32 +509,13 @@ fn heap_spread() -> bool {
 
 /// The host copy and range the buffer view of each of a heap's slots reads
 /// ([`State::heap_buffers`]), by slot.
-#[cfg(all(windows, feature = "native-memory"))]
 type HeapView = (crate::shadow::ShadowHandle, u64, u64);
-#[cfg(all(windows, feature = "native-memory"))]
 struct HeapSpan {
     copy: crate::shadow::ShadowHandle,
     starts: std::collections::BTreeSet<(u64, u32)>,
     ends: std::collections::BTreeSet<(u64, u32)>,
 }
 
-#[cfg(not(all(windows, feature = "native-memory")))]
-type HeapView = (std::sync::Arc<crate::shadow::Shadow>, u64, u64);
-#[cfg(not(all(windows, feature = "native-memory")))]
-struct HeapSpan {
-    copy: std::sync::Arc<crate::shadow::Shadow>,
-    starts: std::collections::BTreeSet<(u64, u32)>,
-    ends: std::collections::BTreeSet<(u64, u32)>,
-}
-
-#[cfg(all(windows, feature = "native-memory"))]
-pub(crate) struct HeapRanges {
-    slots: Vec<Option<HeapView>>,
-    copies: crate::host::ByCopy<HeapSpan>,
-    views: usize,
-}
-
-#[cfg(not(all(windows, feature = "native-memory")))]
 pub(crate) struct HeapRanges {
     slots: Vec<Option<HeapView>>,
     copies: crate::host::ByCopy<HeapSpan>,
@@ -547,7 +528,6 @@ impl Default for HeapRanges {
     }
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 impl HeapRanges {
     fn set(&mut self, slot: u32, range: Option<HeapView>) {
         let index = slot as usize;
@@ -613,71 +593,6 @@ impl HeapRanges {
     }
 
     fn spans(&self) -> impl Iterator<Item = (&crate::shadow::ShadowHandle, u64, u64)> {
-        self.copies.values().filter_map(|span| {
-            Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
-        })
-    }
-
-    #[cfg(test)]
-    fn ranges(&self) -> impl Iterator<Item = &HeapView> {
-        self.slots.iter().flatten()
-    }
-}
-
-#[cfg(not(all(windows, feature = "native-memory")))]
-impl HeapRanges {
-    fn set(&mut self, slot: u32, range: Option<HeapView>) {
-        let index = slot as usize;
-        if range.is_none() && index >= self.slots.len() {
-            return;
-        }
-        if index >= self.slots.len() {
-            self.slots.resize_with(index + 1, || None);
-        }
-        let key = |copy: &std::sync::Arc<crate::shadow::Shadow>| std::sync::Arc::as_ptr(copy) as usize;
-        let old = &mut self.slots[index];
-        if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
-            && std::sync::Arc::ptr_eq(a, b) && from == start && to == end
-        {
-            return;
-        }
-        if let Some((copy, from, to)) = old.take() {
-            let id = key(&copy);
-            let span = self.copies.get_mut(&id).expect("slot's copy is indexed");
-            span.starts.remove(&(from, slot));
-            span.ends.remove(&(to, slot));
-            if span.starts.is_empty() {
-                self.copies.remove(&id);
-            }
-            self.views -= 1;
-        }
-        if let Some((copy, from, to)) = &range {
-            let span = self.copies.entry(key(copy)).or_insert_with(|| HeapSpan {
-                copy: copy.clone(), starts: Default::default(), ends: Default::default(),
-            });
-            span.starts.insert((*from, slot));
-            span.ends.insert((*to, slot));
-            self.views += 1;
-        }
-        *old = range;
-    }
-
-    /// Forget slots absent from this partition's revalidation, retaining
-    /// known ranges until their slot has actually been looked at again.
-    fn prune_part(&mut self, part: u32, parts: u32, present: &[u32]) {
-        let mut present = present.iter().copied().peekable();
-        for index in (part as usize..self.slots.len()).step_by(parts as usize) {
-            let slot = index as u32;
-            while present.peek().is_some_and(|&next| next < slot) {
-                present.next();
-            }
-            if self.slots[index].is_some() && present.peek() != Some(&slot) {
-                self.set(slot, None);
-            }
-        }
-    }
-
-    fn spans(&self) -> impl Iterator<Item = (&std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
         self.copies.values().filter_map(|span| {
             Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
         })
@@ -973,14 +888,7 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
     });
     // A root constant-buffer view has a known 64 KiB access size. Unknown-size
     // root SRVs keep the unsized path and its conservative 4 MiB window.
-    #[cfg(all(windows, feature = "native-memory"))]
-    let shadow: ShadowHandle = if crate::memory_backend::is_native_backend_active() {
-        crate::shadow::find_known_handle(address, if srv { 1 } else { 1 << 16 })?
-    } else {
-        crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into()
-    };
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    let shadow: ShadowHandle = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into();
+    let shadow: ShadowHandle = crate::shadow::find_known_handle(address, if srv { 1 } else { 1 << 16 })?;
     let len = shadow
         .left(address)
         .min(if srv { limit } else { 1 << 16 });
@@ -1103,7 +1011,6 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         });
         ranges.set(index, range);
     }
-    #[cfg(not(all(windows, feature = "native-memory")))]
     if crate::picked::on() {
         crate::picked::shown(unordered, all);
     }
@@ -1478,27 +1385,12 @@ impl State {
             // shortcut: found again here, not taken from the list's slot.
             return match self.roots_ref(compute).get(usize::from(slot)) {
                 Some(&Root::View(address)) => {
-                    #[cfg(all(windows, feature = "native-memory"))]
-                    if crate::memory_backend::is_native_backend_active() {
-                        crate::shadow::find_handle(address, 1).map_or(0, |s| {
-                            // For native backend, the base is the resource's GPU VA
-                            // The offset within the resource is (gpu(address) - base)
-                            // But we don't have direct access to the resource here
-                            // Return 0 as bias for native backend (not used in same way)
-                            0
-                        })
-                    } else {
-                        crate::shadow::find(address, 1).map_or(0, |s| {
-                            // SAFETY: a live buffer.
-                            let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                            ((s.gpu(address) - base) & 15) as u32
-                        })
-                    }
-                    #[cfg(not(all(windows, feature = "native-memory")))]
-                    crate::shadow::find(address, 1).map_or(0, |s| {
-                        // SAFETY: a live buffer.
-                        let base = unsafe { s.buffer.GetGPUVirtualAddress() };
-                        ((s.gpu(address) - base) & 15) as u32
+                    crate::shadow::find_handle(address, 1).map_or(0, |s| {
+                        // For native backend, the base is the resource's GPU VA
+                        // The offset within the resource is (gpu(address) - base)
+                        // But we don't have direct access to the resource here
+                        // Return 0 as bias for native backend (not used in same way)
+                        0
                     })
                 }
                 _ => 0,
@@ -1579,12 +1471,8 @@ impl State {
                 addresses.push(self.view_address(compute, u.slot, u.dword));
             }
         }
-        // Check if native memory backend is active
-        #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            return crate::memory::ready_native(list, heap, &addresses, &written, &constants, use_, t.threads);
-        }
-        crate::memory::ready(list, heap, &addresses, &written, &constants, use_, t.threads)
+        // Native backend always active
+        return crate::memory::ready_native(list, heap, &addresses, &written, &constants, use_, t.threads);
     }
 
     /// The bound heap holding `handle`.
@@ -1977,17 +1865,8 @@ impl State {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map_or(u64::MAX, |mb| mb << 20)
         });
-        #[cfg(all(windows, feature = "native-memory"))]
         let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(a, 1).map(|s| s)
-            } else {
-                crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
-            }
-        };
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let find = |a: u64| -> Option<crate::shadow::ShadowHandle> {
-            crate::shadow::find(a, 1).map(ShadowHandle)
+            crate::shadow::find_handle(a, 1)
         };
         let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);
@@ -2103,16 +1982,7 @@ impl State {
             Some((index, shadow)) => (*index, shadow.clone()),
             None => {
                 let addr = address.unwrap_or(0);
-                let shadow = {
-                    #[cfg(all(windows, feature = "native-memory"))]
-                    if crate::memory_backend::is_native_backend_active() {
-                        crate::shadow::find_handle(addr, 1)
-                    } else {
-                        crate::shadow::find(addr, 1).map(Into::into)
-                    }
-                    #[cfg(not(all(windows, feature = "native-memory")))]
-                    crate::shadow::find(addr, 1).map(Into::into)
-                };
+                let shadow = crate::shadow::find_handle(addr, 1);
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };
@@ -3127,16 +2997,7 @@ impl State {
             }
             for &(slot, _) in stage.root_cbvs.iter().chain(&stage.root_srvs).chain(&stage.root_uavs) {
                 if let Some(Root::View(address)) = self.roots_ref(compute).get(usize::from(slot)) {
-                    let host = {
-                        #[cfg(all(windows, feature = "native-memory"))]
-                        if crate::memory_backend::is_native_backend_active() {
-                            crate::shadow::find_handle(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
-                        } else {
-                            crate::shadow::find(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
-                        }
-                        #[cfg(not(all(windows, feature = "native-memory")))]
-                        crate::shadow::find(*address, 1).map(|s| (s.gpu(*address), s.left(*address)))
-                    };
+                    let host = crate::shadow::find_handle(*address, 1).map(|s| (s.gpu(*address), s.left(*address)));
                     let _ = write!(text, " root{slot}={address:#x} host {host:#x?}");
                 }
             }
@@ -3884,16 +3745,7 @@ impl State {
             if v.address == 0
                 || stride == 0
                 || u64::from(first + count) * stride > u64::from(v.size)
-                || {
-                    #[cfg(all(windows, feature = "native-memory"))]
-                    if crate::memory_backend::is_native_backend_active() {
-                        crate::shadow::find_handle(from, rects * 3 * stride).is_none()
-                    } else {
-                        crate::shadow::find(from, rects * 3 * stride).is_none()
-                    }
-                    #[cfg(not(all(windows, feature = "native-memory")))]
-                    crate::shadow::find(from, rects * 3 * stride).is_none()
-                }
+                || crate::shadow::find_handle(from, rects * 3 * stride).is_none()
             {
                 once!(slot, "rectangle vertices outside their buffer");
                 return false;

@@ -208,7 +208,6 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     let host = crate::shader_cache::host_shader(container)?;
     
     // Record shader permutation for ahead-of-time compilation tracking
-    #[cfg(feature = "native-memory")]
     {
         let translation_fingerprint = victory_shader::emit::translation_fingerprint();
         let root_signature_hash = compute_root_signature_hash(&host);

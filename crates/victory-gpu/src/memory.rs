@@ -1072,7 +1072,6 @@ pub(crate) fn ready(
 
 /// Native backend ready path: bypasses the directory/shadow system entirely.
 /// Uses direct GPU VA mapping from the native memory backend.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(crate) fn ready_native(
     list: &HostList,
     heap: &HostHeap,

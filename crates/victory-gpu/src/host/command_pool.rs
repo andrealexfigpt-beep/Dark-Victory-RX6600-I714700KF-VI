@@ -291,7 +291,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(all(windows, feature = "native-memory"))]
     fn test_command_pool_creation() {
         let host = host().expect("Failed to get host");
         let pool = CommandPool::new(&host.device).expect("Failed to create command pool");

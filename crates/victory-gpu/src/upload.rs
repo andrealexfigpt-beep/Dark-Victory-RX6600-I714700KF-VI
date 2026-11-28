@@ -36,7 +36,6 @@ enum Kind {
     Low(usize, usize),
     Heap(Vec<u8>),
     /// Native backend ring buffer: (offset, pointer, length).
-    #[cfg(all(windows, feature = "native-memory"))]
     NativeRing(u64, *mut u8, usize),
 }
 
@@ -92,14 +91,11 @@ pub(crate) fn reserve(len: usize) -> Option<usize> {
 
 impl Upload {
     pub(crate) fn new(len: usize) -> Option<Upload> {
-        // Check if native backend is active
-        #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            if let Some(backend) = crate::memory_backend::memory_backend() {
-                // Use native backend's upload ring buffer via trait method
-                let (offset, ptr) = backend.allocate_upload(len as u64, crate::native_mem::UPLOAD_ALIGNMENT)?;
-                return Some(Upload(Kind::NativeRing(offset, ptr, len)));
-            }
+        // Always use native backend's upload ring buffer when available
+        if let Some(backend) = crate::memory_backend::memory_backend() {
+            // Use native backend's upload ring buffer via trait method
+            let (offset, ptr) = backend.allocate_upload(len as u64, crate::native_mem::UPLOAD_ALIGNMENT)?;
+            return Some(Upload(Kind::NativeRing(offset, ptr, len)));
         }
         
         if !low() {
@@ -131,7 +127,6 @@ impl Upload {
         match &mut self.0 {
             Kind::Low(at, _) => *at as *mut u8,
             Kind::Heap(block) => block.as_mut_ptr(),
-            #[cfg(all(windows, feature = "native-memory"))]
             Kind::NativeRing(_, ptr, _) => *ptr,
         }
     }
@@ -152,7 +147,6 @@ impl Drop for Upload {
             Kind::Heap(_) => {
                 // Heap memory is automatically freed when the Vec is dropped
             }
-            #[cfg(all(windows, feature = "native-memory"))]
             Kind::NativeRing(_, _, _) => {
                 // Native ring buffer manages its own lifecycle; no action needed on drop
                 // The ring buffer's offset will be reused when the fence allows it
