@@ -253,7 +253,9 @@ pub struct NativeBackend {
 }
 
 // SAFETY: NativeBackend wraps Arc<NativeMemory> which implements Send + Sync.
+#[cfg(all(windows, feature = "native-memory"))]
 unsafe impl Send for NativeBackend {}
+#[cfg(all(windows, feature = "native-memory"))]
 unsafe impl Sync for NativeBackend {}
 
 #[cfg(all(windows, feature = "native-memory"))]

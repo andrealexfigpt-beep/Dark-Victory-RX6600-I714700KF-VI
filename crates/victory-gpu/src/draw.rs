@@ -1461,10 +1461,10 @@ impl State {
             let shadow = if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_any_handle(v.address, u64::from(v.size))
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
             
             let Some(shadow) = shadow else {
                 continue;
@@ -1488,10 +1488,10 @@ impl State {
             let shadow = if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_any_handle(v.address, u64::from(v.size))
             } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy)
+                crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into)
             };
             #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle);
+            let shadow = crate::shadow::find_any(v.address, u64::from(v.size)).map(Into::into);
             
             let Some(shadow) = shadow else {
                 return false;
@@ -1824,12 +1824,12 @@ impl State {
                     s
                 })
             } else {
-                crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
+                crate::shadow::find(a, 1).map(Into::into)
             }
         };
         #[cfg(not(all(windows, feature = "native-memory")))]
         let find = |a: u64| {
-            crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
+            crate::shadow::find(a, 1).map(Into::into)
         };
         let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);
@@ -1948,10 +1948,10 @@ impl State {
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(a, 1).map(|s| (a, s))
             } else {
-                crate::shadow::find(a, 1).map(|s| (a, ShadowHandle::Legacy(s)))
+                crate::shadow::find(a, 1).map(|s| (a, s.into()))
             }
             #[cfg(not(all(windows, feature = "native-memory")))]
-            crate::shadow::find(a, 1).map(|s| (a, ShadowHandle(s)))
+            crate::shadow::find(a, 1).map(|s| (a, s.into()))
         });
                 let Some(index) = host.dynamic(1) else {
                     return false;

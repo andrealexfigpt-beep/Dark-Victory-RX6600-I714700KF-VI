@@ -103,6 +103,13 @@ impl From<Arc<Shadow>> for ShadowHandle {
 }
 
 #[cfg(all(windows, feature = "native-memory"))]
+impl From<Arc<Shadow>> for ShadowHandle {
+    fn from(s: Arc<Shadow>) -> Self {
+        ShadowHandle::Legacy(s)
+    }
+}
+
+#[cfg(all(windows, feature = "native-memory"))]
 impl ShadowHandle {
     /// Get the GPU virtual address for a title address.
     pub fn gpu(&self, address: u64) -> u64 {
