@@ -3281,11 +3281,7 @@ impl HostHeap {
         let view = view_at(key as u32, (key >> 32) as u32)?;
         let mut text: String = format!("{view:?}").chars().take(120).collect();
         if let Some((address, len)) = buffer_range(&view) {
-            let host = if crate::memory_backend::is_native_backend_active() {
-        crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
-    } else {
-        crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
-    };
+            let host = crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address));
             text.push_str(&format!(" title {address:#x}+{len:#x} host {host:#x?}"));
         }
         Some(text)
