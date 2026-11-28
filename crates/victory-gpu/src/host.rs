@@ -446,16 +446,7 @@ fn sweep() {
     crate::book::check();
     let headroom = ram_headroom();
     crate::pool::room(host().and_then(|h| h.video_memory()), headroom, now);
-    #[cfg(all(windows, feature = "native-memory"))]
-    if !crate::memory_backend::is_native_backend_active() {
-        crate::shadow::trim_snapshots(headroom);
-        crate::shadow::let_go_idle(headroom);
-    }
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    {
-        crate::shadow::trim_snapshots(headroom);
-        crate::shadow::let_go_idle(headroom);
-    }
+    // Native backend doesn't need trim_snapshots/let_go_idle
     send::trim_spare(headroom);
     crate::pipeline::trim_library();
     crate::texture::trim_read_scratch(headroom);
@@ -842,13 +833,10 @@ pub(crate) fn host() -> Option<&'static Host> {
     HOST.get_or_init(|| match create() {
         Ok(host) => {
             // Initialize memory backend after host is created
-            #[cfg(all(windows, feature = "native-memory"))]
-            {
-                let device = Arc::new(host.device.clone());
-                let copy_queue = host.copy_queue();
-                if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
-                    tracing::warn!(error = %e, "failed to initialize memory backend");
-                }
+            let device = Arc::new(host.device.clone());
+            let copy_queue = host.copy_queue();
+            if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
+                tracing::warn!(error = %e, "failed to initialize memory backend");
             }
             Some(host)
         }
@@ -2736,20 +2724,14 @@ enum Step {
     /// Brings a range (address, bytes) of a buffer's host copy up to date:
     /// once per submission, whichever lists ask, until a `Copy` or `Run`
     /// intervenes.
-    #[cfg(all(windows, feature = "native-memory"))]
     Refresh(crate::shadow::ShadowHandle, usize, usize),
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    Refresh(std::sync::Arc<crate::shadow::Shadow>, usize, usize),
     /// Work that may write title memory.
     Run(Box<dyn Fn() + Send>),
     /// Work that writes host memory only, and the title memory it reads
     /// (from, to; empty for none).
     Host(Box<dyn Fn() + Send>, (usize, usize)),
     /// Shaders write a range (address, bytes) of a buffer's host copy.
-    #[cfg(all(windows, feature = "native-memory"))]
     GpuWrite(crate::shadow::ShadowHandle, usize, usize),
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    GpuWrite(std::sync::Arc<crate::shadow::Shadow>, usize, usize),
     /// Brings a texture's staging buffer up to date: once per submission,
     /// whichever lists sample it, until a `Copy` or `Run` intervenes.
     Texture(std::sync::Arc<crate::texture::Staging>),
@@ -3135,10 +3117,7 @@ fn late_writes() -> bool {
 
 /// Per host copy, the ranges a submission's shaders may write, as declared
 /// (address, end).
-#[cfg(all(windows, feature = "native-memory"))]
 type Declared = (crate::shadow::ShadowHandle, Vec<(usize, usize)>);
-#[cfg(not(all(windows, feature = "native-memory")))]
-type Declared = (std::sync::Arc<crate::shadow::Shadow>, Vec<(usize, usize)>);
 
 /// What [`Host::submit`] hands back for a submission it sent and did not
 /// wait for.
@@ -3540,10 +3519,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
     (!placed.is_empty() && place::read_by(runs, placed)).then_some(WHY_READ)
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 type RefreshSpan = (crate::shadow::ShadowHandle, usize, usize);
-#[cfg(not(all(windows, feature = "native-memory")))]
-type RefreshSpan = (std::sync::Arc<crate::shadow::Shadow>, usize, usize);
 
 fn framegen_submitted(runs: &[&HostList]) {
     if crate::framegen::enabled() {
@@ -3558,10 +3534,7 @@ fn framegen_submitted(runs: &[&HostList]) {
         }
     }
 }
-#[cfg(all(windows, feature = "native-memory"))]
 type StaleSpan<'a> = (&'a crate::shadow::ShadowHandle, usize, usize);
-#[cfg(not(all(windows, feature = "native-memory")))]
-type StaleSpan<'a> = (&'a crate::shadow::Shadow, usize, usize);
 
 /// Immutable list metadata shared by the submission's write-watch query and
 /// any retries after a landing. GPU ownership and page state are checked anew.
@@ -4037,9 +4010,6 @@ struct RelayBack {
 }
 
 fn relay_hand_back(back: &[Declared]) -> RelayBack {
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    let mut work: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> = Vec::new();
-    #[cfg(all(windows, feature = "native-memory"))]
     let mut work: Vec<(crate::shadow::ShadowHandle, usize, usize)> = Vec::new();
     for (shadow, declared) in back {
         if shadow.carded() {
@@ -4050,9 +4020,6 @@ fn relay_hand_back(back: &[Declared]) -> RelayBack {
         for &(from, to) in &spans {
             shadow.relay_compared(from, to - from);
         }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
-        #[cfg(all(windows, feature = "native-memory"))]
         work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
     }
     RelayBack { work, found: None }
@@ -4453,9 +4420,6 @@ fn hand_back(back: &[Declared]) {
     if crate::shadow::wide_back() {
         // Every range first (the pieces that differ, found on several
         // threads), then the merges, in order, as below.
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let mut work: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> = Vec::new();
-        #[cfg(all(windows, feature = "native-memory"))]
         let mut work: Vec<(crate::shadow::ShadowHandle, usize, usize)> = Vec::new();
         for (shadow, declared) in back {
             if shadow.carded() {
@@ -4470,9 +4434,6 @@ fn hand_back(back: &[Declared]) {
                     _ => spans.push((from, to)),
                 }
             }
-            #[cfg(not(all(windows, feature = "native-memory")))]
-            work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
-            #[cfg(all(windows, feature = "native-memory"))]
             work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
         }
         #[cfg(feature = "diagnostics")]
@@ -4806,10 +4767,8 @@ impl Host {
     fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
         use std::sync::Arc;
         // Skip legacy card buffers when native backend is active
-        #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            return None;
-        }
+        // Native backend doesn't use card buffers
+        return None;
         if !crate::shadow::cards() {
             return None;
         }
@@ -6157,13 +6116,8 @@ impl Host {
         stage.next("submit: gathering what to ask about");
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // Skip legacy shadow system when native backend is active
-        #[cfg(all(windows, feature = "native-memory"))]
-        if !crate::memory_backend::is_native_backend_active() {
-            // The ranges shaders write are counted for it (with the relay).
-            crate::shadow::preparing(this_submission);
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::preparing(this_submission);
+        // Native backend doesn't use shadow::preparing
+        // The ranges shaders write are counted for it (with the relay).
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         ahead.part(14);
@@ -6247,24 +6201,7 @@ impl Host {
         // The snapshots of the ranges shaders may write, if they were left
         // for now (`crate::shadow::wide_back`): the refreshes are done, the
         // lists have not gone to the card.
-        #[cfg(all(windows, feature = "native-memory"))]
-        if !crate::memory_backend::is_native_backend_active() {
-            {
-                #[cfg(feature = "diagnostics")]
-                let snapshots = std::time::Instant::now();
-                crate::shadow::take_snapshots();
-                #[cfg(feature = "diagnostics")]
-                crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
-            }
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        {
-            #[cfg(feature = "diagnostics")]
-            let snapshots = std::time::Instant::now();
-            crate::shadow::take_snapshots();
-            #[cfg(feature = "diagnostics")]
-            crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
-        }
+        // Native backend doesn't take snapshots
         #[cfg(feature = "diagnostics")]
         split.part(3);
         stage.next("submit: copies in the card's memory");
@@ -6277,16 +6214,10 @@ impl Host {
             self.settle(&mut submitted, WHY_MOST);
             settled += settling.elapsed();
         }
-        // What shaders may write through views they pick: last, so that no
+        /// What shaders may write through views they pick: last, so that no
         // refresh of this submission leaves it alone.
-        #[cfg(all(windows, feature = "native-memory"))]
-        let picked = if crate::memory_backend::is_native_backend_active() {
-            crate::picked::Ranges::default()
-        } else {
-            crate::picked::declare(runs)
-        };
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let picked = crate::picked::declare(runs);
+        // Native backend doesn't use picked ranges
+        let picked = crate::picked::Ranges::default();
         for (shadow, at, len) in &picked.written {
             shadow.writing(*at, *len);
         }
@@ -6520,14 +6451,7 @@ impl Host {
         // With the relay: nothing is in the air now, so no fetch still to
         // be merged is older than the sends to card copies so far, and
         // their notes can go.
-        #[cfg(all(windows, feature = "native-memory"))]
-        if relay() && !crate::memory_backend::is_native_backend_active() {
-            crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        if relay() {
-            crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
-        }
+        // Native backend doesn't use relay
         working(was_working);
         None
     }
@@ -7460,23 +7384,6 @@ impl HostList {
     /// Brings `[address, address + len)` of a buffer's host copy up to date
     /// when the list is submitted (once per range until a title copy
     /// intervenes), keeping the copy alive until the list is reset.
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    pub(crate) fn defer_refresh(
-        &self,
-        shadow: &std::sync::Arc<crate::shadow::Shadow>,
-        address: usize,
-        len: usize,
-    ) {
-        let mut deferred = self.deferred();
-        let key = (.as_ptr()(shadow) as usize, address, len);
-        if deferred.refreshed.insert(key) {
-            deferred
-                .copies
-                .push(Step::Refresh(shadow.clone(), address, len));
-        }
-    }
-
-    #[cfg(all(windows, feature = "native-memory"))]
     pub(crate) fn defer_refresh(
         &self,
         shadow: &crate::shadow::ShadowHandle,
@@ -7497,21 +7404,6 @@ impl HostList {
     /// Declared once until the list next writes title memory (but with
     /// `VICTORY_DECLARE_ONCE=0`): the dispatches of a frame declared the
     /// same ranges thousands of times, each a step of its own.
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    pub(crate) fn defer_gpu_write(
-        &self,
-        shadow: &std::sync::Arc<crate::shadow::Shadow>,
-        address: usize,
-        len: usize,
-    ) {
-        let mut deferred = self.deferred();
-        let key = (.as_ptr()(shadow) as usize, address, len);
-        if deferred.gpu_written.insert(key) || !declare_once() {
-            deferred.copies.push(Step::GpuWrite(shadow.clone(), address, len));
-        }
-    }
-
-    #[cfg(all(windows, feature = "native-memory"))]
     pub(crate) fn defer_gpu_write(
         &self,
         shadow: &crate::shadow::ShadowHandle,
@@ -9503,7 +9395,6 @@ impl Meter {
         crate::copystat::presented();
         self.frames += 1;
         // Advance memory backend frame counter
-        #[cfg(all(windows, feature = "native-memory"))]
         if let Some(backend) = crate::memory_backend::memory_backend() {
             backend.next_frame();
         }
@@ -9545,11 +9436,7 @@ impl Meter {
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
         );
-        #[cfg(all(windows, feature = "native-memory"))]
-        if !crate::memory_backend::is_native_backend_active() {
-            crate::shadow::exact_line(frames);
-            crate::shadow::back_line(frames);
-        }
+        // Native backend doesn't use exact_line/back_line
         #[cfg(not(all(windows, feature = "native-memory")))]
         {
             crate::shadow::exact_line(frames);
@@ -9618,12 +9505,8 @@ impl Meter {
         // Depth planes drawn from their twins.
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
-        #[cfg(all(windows, feature = "native-memory"))]
-        let card = if crate::memory_backend::is_native_backend_active() {
-            [0u64; 10]
-        } else {
-            crate::shadow::card_stats()
-        };
+        // Native backend doesn't use card stats
+        let card = [0u64; 10];
         #[cfg(not(all(windows, feature = "native-memory")))]
         let card = crate::shadow::card_stats();
         #[cfg(feature = "diagnostics")]
