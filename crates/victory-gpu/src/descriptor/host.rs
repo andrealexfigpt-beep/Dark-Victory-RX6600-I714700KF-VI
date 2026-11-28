@@ -3552,7 +3552,7 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
 }
 
 #[cfg(not(all(windows, feature = "native-memory")))]
-pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u64, u64)> {
+pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
         return None;
@@ -3563,14 +3563,12 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
         && address >= base
         && address - base < width.max(1)
         && let Some(shadow) = {
-            crate::shadow::find(base, width).map(ShadowHandle)
+            crate::shadow::find(base, width)
         }
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
-    let shadow = {
-        crate::shadow::find(address, len).map(ShadowHandle)
-    }?;
+    let shadow = crate::shadow::find(address, len)?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
