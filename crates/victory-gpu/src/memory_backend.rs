@@ -141,18 +141,6 @@ pub trait MemoryBackend: Send + Sync {
     fn copy_back(&self, gpu_va: u64, address: u64, len: u64) -> Result<usize> {
         Err(anyhow::anyhow!("Not implemented"))
     }
-
-    /// Allocate space in the upload ring buffer (native backend only).
-    /// Returns (offset, mapped_ptr) for CPU writes.
-    fn allocate_upload(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
-        None
-    }
-
-    /// Allocate space in the readback ring buffer (native backend only).
-    /// Returns (offset, mapped_ptr) for CPU reads.
-    fn allocate_readback(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
-        None
-    }
 }
 
 /// Native backend wrapper.
