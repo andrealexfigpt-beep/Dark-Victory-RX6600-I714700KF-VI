@@ -19,11 +19,12 @@ use std::ptr;
 
 use dashmap::DashMap;
 use tracing::{debug, info, warn};
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, CloseHandle, WAIT_OBJECT_0, INFINITE};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VIRTUAL_ALLOCATION_TYPE, PAGE_PROTECTION_FLAGS};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::core::Interface;
 
 use crate::host::{host, Host, HostList};
 use crate::resource::{AllocationInfo, footprint};
@@ -77,6 +78,18 @@ impl Drop for HostAllocation {
                 VirtualFree(self.base_ptr, 0, MEM_RELEASE);
             }
         }
+    }
+}
+
+impl Drop for NativeMemory {
+    fn drop(&mut self) {
+        // Close event handles
+        if !self.copy_fence_event.is_invalid() {
+            unsafe {
+                CloseHandle(self.copy_fence_event);
+            }
+        }
+        // UploadRing and ReadbackRing events are dropped with their structs
     }
 }
 
@@ -582,7 +595,7 @@ impl Drop for UploadRing {
     fn drop(&mut self) {
         if !self.fence_event.is_invalid() {
             unsafe {
-                windows::Win32::Foundation::CloseHandle(self.fence_event);
+                CloseHandle(self.fence_event);
             }
         }
         // Resource and fence are reference-counted, will be dropped automatically
@@ -742,7 +755,7 @@ impl Drop for ReadbackRing {
     fn drop(&mut self) {
         if !self.fence_event.is_invalid() {
             unsafe {
-                windows::Win32::Foundation::CloseHandle(self.fence_event);
+                CloseHandle(self.fence_event);
             }
         }
     }
@@ -1074,7 +1087,7 @@ impl NativeMemory {
         };
 
         let resource: ID3D12Resource = unsafe {
-            new_arena.heap().CreatePlacedResource(offset, &desc, D3D12_RESOURCE_STATE_COMMON, None)?
+            self.device.CreatePlacedResource(new_arena.heap(), offset, &desc, D3D12_RESOURCE_STATE_COMMON, None)?
         };
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
@@ -1141,10 +1154,11 @@ impl NativeMemory {
             std::ptr::copy_nonoverlapping(data.as_ptr(), ring_ptr, size as usize);
         }
 
-        // Record copy command
+        // Record copy command on copy command list
+        let copy_list = self.copy_list.lock().unwrap();
         let copy_queue = &self.copy_queue;
         unsafe {
-            copy_queue.CopyBufferRegion(
+            copy_list.CopyBufferRegion(
                 &binding.resource,
                 offset,
                 &ring.resource,
@@ -1152,9 +1166,10 @@ impl NativeMemory {
                 size,
             );
         }
+        unsafe { copy_list.Close()? };
 
-        // Signal fence
-        let fence_value = ring.signal_fence(copy_queue);
+        // Execute and signal fence
+        let fence_value = self.execute_copy_list()?;
         binding.fence_value = fence_value;
 
         self.stats.upload_bytes.fetch_add(size, Ordering::Relaxed);
@@ -1267,12 +1282,12 @@ impl NativeMemory {
         footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
         rows: u32,
     ) -> anyhow::Result<()> {
-        let list = self.copy_list.lock().unwrap();
-        let allocator = self.copy_allocator.lock().unwrap();
+        let mut list = self.copy_list.lock().unwrap();
+        let mut allocator = self.copy_allocator.lock().unwrap();
         
         // Reset allocator and list
         unsafe { allocator.Reset()? };
-        unsafe { list.Reset(&allocator, None)? };
+        unsafe { list.Reset(&*allocator, None)? };
 
         // Source: placed footprint on upload ring buffer
         let from = D3D12_TEXTURE_COPY_LOCATION {
@@ -1311,7 +1326,7 @@ impl NativeMemory {
         let copy_queue = &self.copy_queue;
         
         unsafe {
-            copy_queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+            copy_queue.ExecuteCommandLists(&[Some(list.as_ref().clone())]);
         }
 
         let fence_value = self.copy_fence_value.fetch_add(1, Ordering::AcqRel);
@@ -1487,10 +1502,11 @@ impl NativeMemory {
             std::thread::yield_now();
         };
 
-        // Record copy command
+        // Record copy command on copy command list
+        let copy_list = self.copy_list.lock().unwrap();
         let copy_queue = &self.copy_queue;
         unsafe {
-            copy_queue.CopyBufferRegion(
+            copy_list.CopyBufferRegion(
                 &ring.resource,
                 ring_offset,
                 &binding.resource,
@@ -1498,9 +1514,10 @@ impl NativeMemory {
                 size,
             );
         }
+        unsafe { copy_list.Close()? };
 
-        // Signal and wait for fence (readback must be synchronous for correctness)
-        let fence_value = ring.signal_fence(copy_queue);
+        // Execute and signal fence
+        let fence_value = self.execute_copy_list()?;
         ring.wait_fence(fence_value);
 
         // Copy data from ring buffer
@@ -1720,7 +1737,7 @@ impl NativeMemory {
         tex_desc.Layout = layout;
 
         let resource: ID3D12Resource = unsafe {
-            new_arena.heap().CreatePlacedResource(offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None)?
+            self.device.CreatePlacedResource(new_arena.heap(), offset, &tex_desc, D3D12_RESOURCE_STATE_COMMON, None)?
         };
 
         let gpu_va = unsafe { resource.GetGPUVirtualAddress() };
