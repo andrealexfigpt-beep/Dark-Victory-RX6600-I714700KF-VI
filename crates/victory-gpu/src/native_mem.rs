@@ -2169,6 +2169,24 @@ impl NativeShadow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use windows::Win32::Graphics::{Direct3D::D3D_FEATURE_LEVEL_12_0, Direct3D12::*, Dxgi::{*, Common::*}};
+
+    fn create_test_device() -> (Arc<ID3D12Device>, Arc<ID3D12CommandQueue>) {
+        let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }.unwrap();
+        for index in 0.. {
+            let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE) }.expect("physical D3D12 adapter");
+            let desc = unsafe { adapter.GetDesc1() }.unwrap();
+            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 { continue; }
+            let mut device: Option<ID3D12Device> = None;
+            if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device) }.is_err() { continue; }
+            let device = device.unwrap();
+            eprintln!("D3D12 physical adapter: {}", String::from_utf16_lossy(&desc.Description).trim_end_matches(char::from(0)));
+            let queue = unsafe { device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_COPY, ..Default::default() }) }.unwrap();
+            return (Arc::new(device), Arc::new(queue));
+        }
+        unreachable!()
+    }
 
     #[test]
     fn test_page_alignment() {
@@ -2179,5 +2197,109 @@ mod tests {
     #[test]
     fn test_max_title_pages() {
         assert_eq!(MAX_TITLE_PAGES, 1 << 26); // 4 GiB / 64 KiB
+    }
+
+    /// Regression tests for native memory backend fixes.
+    mod regression_tests {
+        use super::*;
+
+        /// Test that NativeShadow can be created and updated without a pre-existing host allocation.
+        /// This reproduces the "native shadow range requires committed title memory" crash.
+        #[test]
+        fn test_native_shadow_without_preexisting_host_allocation() {
+            let (device, copy_queue) = create_test_device();
+            let mem = Arc::new(NativeMemory::new(device.clone(), copy_queue.clone()).expect("Failed to create native memory"));
+
+            // Create a GPU resource WITHOUT first allocating host memory
+            // This simulates the scenario where register() creates a GPU resource
+            // but XMemVirtualAlloc hasn't been called yet for that range
+            let va = 0x1200_0000;
+            let size = PAGE * 4; // 256 KiB
+            let _gpu_binding = mem.create_gpu_resource(va, size, true).expect("GPU resource creation failed");
+
+            // Verify GPU binding exists
+            assert!(mem.has_gpu_binding(va));
+
+            // Now create a NativeShadow for this range (as find_handle would do)
+            let shadow = NativeShadow::new(mem.clone(), va, size, true).expect("NativeShadow creation failed");
+
+            // Update the shadow - this should trigger host_range which ensures a committed allocation
+            let test_data: Vec<u8> = (0..size as usize).map(|i| (i & 0xFF) as u8).collect();
+            let copied = shadow.update(va as usize, test_data.len());
+            assert_eq!(copied, test_data.len(), "Update should copy all bytes");
+
+            // Verify host allocation was created
+            let alloc = mem.get_allocation(va & !(PAGE - 1)); // Page-aligned base
+            assert!(alloc.is_some(), "Host allocation should have been created on-demand");
+            let alloc = alloc.unwrap();
+            assert!(!alloc.is_placeholder(), "Allocation should be committed");
+            assert!(alloc.committed_size() >= size, "Allocation should cover the range");
+
+            // Read back and verify data integrity
+            let readback = mem.readback_from_gpu(va, 0, size).expect("Readback failed");
+            assert_eq!(readback, test_data, "Data mismatch after upload/readback");
+        }
+
+        /// Test that NativeShadow works with placeholder allocations (reserved but not committed).
+        #[test]
+        fn test_native_shadow_with_placeholder_allocation() {
+            let (device, copy_queue) = create_test_device();
+            let mem = Arc::new(NativeMemory::new(device.clone(), copy_queue.clone()).expect("Failed to create native memory"));
+
+            // Reserve address space as placeholder (like XMemVirtualAlloc with PAGES_64K, no MEM_COMMIT)
+            let va = 0x1300_0000;
+            let size = PAGE * 16; // 1 MiB
+            mem.allocate(va, size, 0x04, true).expect("Placeholder allocation failed");
+
+            // Verify it's a placeholder
+            let alloc = mem.get_allocation(va).expect("Placeholder allocation should exist");
+            assert!(alloc.is_placeholder());
+            assert_eq!(alloc.committed_size(), 0);
+
+            // Create GPU resource
+            let _gpu_binding = mem.create_gpu_resource(va, size, true).expect("GPU resource creation failed");
+
+            // Create NativeShadow and update - should commit the placeholder
+            let shadow = NativeShadow::new(mem.clone(), va, size, true).expect("NativeShadow creation failed");
+            let test_data = vec![0xAB; size as usize];
+            let copied = shadow.update(va as usize, test_data.len());
+            assert_eq!(copied, test_data.len());
+
+            // Verify placeholder was committed
+            let alloc = mem.get_allocation(va).expect("Allocation should still exist");
+            assert!(!alloc.is_placeholder(), "Placeholder should have been committed");
+            assert_eq!(alloc.committed_size(), size, "Allocation should be fully committed");
+
+            // Read back and verify
+            let readback = mem.readback_from_gpu(va, 0, size).expect("Readback failed");
+            assert_eq!(readback, test_data, "Data mismatch after commit and upload");
+        }
+
+        /// Test partial update of a NativeShadow range.
+        #[test]
+        fn test_native_shadow_partial_update() {
+            let (device, copy_queue) = create_test_device();
+            let mem = Arc::new(NativeMemory::new(device.clone(), copy_queue.clone()).expect("Failed to create native memory"));
+
+            let va = 0x1400_0000;
+            let size = PAGE * 4; // 256 KiB
+            let _gpu_binding = mem.create_gpu_resource(va, size, true).expect("GPU resource creation failed");
+
+            let shadow = NativeShadow::new(mem.clone(), va, size, true).expect("NativeShadow creation failed");
+
+            // Update only the middle page
+            let page_offset = PAGE as usize;
+            let page_data = vec![0xCD; PAGE as usize];
+            let copied = shadow.update(va as usize + page_offset, page_data.len());
+            assert_eq!(copied, page_data.len());
+
+            // Verify host allocation covers the full range (page-aligned)
+            let alloc = mem.get_allocation(va).expect("Host allocation should exist");
+            assert!(alloc.committed_size() >= size);
+
+            // Read back the updated page
+            let readback = mem.readback_from_gpu(va + PAGE, 0, PAGE).expect("Partial readback failed");
+            assert_eq!(readback, page_data);
+        }
     }
 }
