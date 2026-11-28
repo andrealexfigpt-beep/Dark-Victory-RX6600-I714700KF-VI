@@ -141,8 +141,10 @@ impl Drop for Upload {
     fn drop(&mut self) {
         match &self.0 {
             Kind::Low(at, len) => {
+                let at = *at;
+                let len = *len;
                 let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(arena) = arenas.iter_mut().find(|a| (a.at..a.at + a.taken.len() * BLOCK).contains(at)) {
+                if let Some(arena) = arenas.iter_mut().find(|a| (a.at..a.at + a.taken.len() * BLOCK).contains(&at)) {
                     let first = (at - arena.at) / BLOCK;
                     arena.taken[first..first + len.max(1).div_ceil(BLOCK)].fill(false);
                 }

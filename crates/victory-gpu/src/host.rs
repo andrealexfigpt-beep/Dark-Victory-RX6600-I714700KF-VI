@@ -2736,6 +2736,9 @@ enum Step {
     /// Brings a range (address, bytes) of a buffer's host copy up to date:
     /// once per submission, whichever lists ask, until a `Copy` or `Run`
     /// intervenes.
+    #[cfg(all(windows, feature = "native-memory"))]
+    Refresh(crate::shadow::ShadowHandle, usize, usize),
+    #[cfg(not(all(windows, feature = "native-memory")))]
     Refresh(std::sync::Arc<crate::shadow::Shadow>, usize, usize),
     /// Work that may write title memory.
     Run(Box<dyn Fn() + Send>),
@@ -2743,6 +2746,9 @@ enum Step {
     /// (from, to; empty for none).
     Host(Box<dyn Fn() + Send>, (usize, usize)),
     /// Shaders write a range (address, bytes) of a buffer's host copy.
+    #[cfg(all(windows, feature = "native-memory"))]
+    GpuWrite(crate::shadow::ShadowHandle, usize, usize),
+    #[cfg(not(all(windows, feature = "native-memory")))]
     GpuWrite(std::sync::Arc<crate::shadow::Shadow>, usize, usize),
     /// Brings a texture's staging buffer up to date: once per submission,
     /// whichever lists sample it, until a `Copy` or `Run` intervenes.
