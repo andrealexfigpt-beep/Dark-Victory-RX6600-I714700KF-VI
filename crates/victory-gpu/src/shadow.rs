@@ -5582,7 +5582,7 @@ pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
 
 #[cfg(all(windows, not(feature = "native-memory")))]
 pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    find(address, len).map(ShadowHandle::Legacy)
+    find(address, len).map(ShadowHandle)
 }
 
 /// As [`find`], for an ask that is done with the copy when its list has

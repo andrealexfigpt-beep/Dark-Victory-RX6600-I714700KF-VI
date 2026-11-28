@@ -205,7 +205,7 @@ pub(crate) struct HostHeap {
     changed: Slots,
     /// Buffer refresh spans and pass count. Dropping the heap releases the
     /// cached shadow references.
-    pub(crate) buffer_ranges: Mutex<(u64, crate::draw::HeapRanges<crate::shadow::Shadow>)>,
+    pub(crate) buffer_ranges: Mutex<(u64, crate::draw::HeapRanges)>,
     /// Title slots holding a view of a texture the title may fill itself (a
     /// placed texture, a texture object), with the frame from which they
     /// are due: such a texture is uploaded when a draw reads it through a
@@ -4123,11 +4123,7 @@ fn make_twinned(
     let device = &host.device;
     match view {
         &View::Constant(address, size) => {
-            let shadow: ShadowHandle = if crate::memory_backend::is_native_backend_active() {
-            crate::shadow::find_handle(address, u64::from(size)).unwrap_or_else(|| crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy).unwrap())
-        } else {
-            crate::shadow::find_handle(address, u64::from(size)).unwrap_or_else(|| crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy).unwrap())
-        };
+            let shadow: ShadowHandle = crate::shadow::find_handle(address, u64::from(size)).unwrap_or_else(|| crate::shadow::find(address, u64::from(size)).map(Into::into).unwrap());
             let gpu = shadow.gpu(address);
             if gpu % 256 != 0 {
                 once!(
@@ -5306,7 +5302,7 @@ mod tests {
             let (copy, ..) = buffer_copy(&v).unwrap();
             assert_ne!(copy.span().0, start + off, "its buffer's copy");
             // SAFETY: a live buffer.
-            assert_eq!(width(&v), unsafe { copy.buffer.GetDesc() }.Width);
+            assert_eq!(width(&v), unsafe { copy.resource().GetDesc() }.Width);
         }
     }
 

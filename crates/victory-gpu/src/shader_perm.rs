@@ -22,7 +22,7 @@ pub struct ShaderPermutationKey {
     /// BLAKE3 hash of the original DXBC container
     pub container_hash: [u8; 32],
     /// Translation fingerprint (translator version + all VICTORY_* settings)
-    pub translation_fingerprint: [u8; 32],
+    pub translation_fingerprint: Vec<u8>,
     /// Root signature hash (affects resource binding layout)
     pub root_signature_hash: [u8; 32],
     /// Whether this is a wave64 program on a 32-lane host
@@ -149,7 +149,7 @@ impl From<&HostShader> for ShaderPermutation {
             key: ShaderPermutationKey {
                 stage: shader.stage,
                 container_hash: [0; 32], // Filled in by caller
-                translation_fingerprint: [0; 32], // Filled in by caller
+                translation_fingerprint: vec![0; 32], // Filled in by caller
                 root_signature_hash: [0; 32], // Filled in by caller
                 wave_mismatch: false, // Filled in by caller
                 cross_lane: false, // Filled in by caller
@@ -396,7 +396,7 @@ pub struct PermutationStats {
 #[derive(Debug, Serialize, Deserialize)]
 struct OfflineCompilationExport {
     version: u32,
-    translation_fingerprint: [u8; 32],
+    translation_fingerprint: Vec<u8>,
     permutations: Vec<ShaderPermutation>,
 }
 

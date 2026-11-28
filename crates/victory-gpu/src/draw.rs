@@ -1088,7 +1088,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         let _ = found[n].set(looked);
     });
     for (index, shows) in found.into_iter().filter_map(std::sync::OnceLock::into_inner).flatten() {
-        let range: Option<HeapView<crate::shadow::Shadow>> = shows.map(|(range, written)| {
+        let range: Option<HeapView> = shows.map(|(range, written)| {
             if written {
                 unordered.push(range.clone());
             }
@@ -1626,17 +1626,9 @@ impl State {
             if v.address == 0 || v.size == 0 {
                 continue;
             }
-            #[cfg(all(windows, feature = "native-memory"))]
-            let shadow: crate::shadow::ShadowHandle = if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_any_handle(v.address, u64::from(v.size)).unwrap_or_else(|| crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap())
-            } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap()
-            };
-            #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle).unwrap();
-            
-            let Some(shadow) = shadow else {
-                continue;
+            let shadow: crate::shadow::ShadowHandle = match crate::shadow::find_any_handle(v.address, u64::from(v.size)) {
+                Some(s) => s,
+                None => continue,
             };
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
@@ -1653,17 +1645,9 @@ impl State {
         }
         if indexed {
             let v = self.index;
-            #[cfg(all(windows, feature = "native-memory"))]
-            let shadow: crate::shadow::ShadowHandle = if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_any_handle(v.address, u64::from(v.size)).unwrap_or_else(|| crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap())
-            } else {
-                crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle::Legacy).unwrap()
-            };
-            #[cfg(not(all(windows, feature = "native-memory")))]
-            let shadow: crate::shadow::ShadowHandle = crate::shadow::find_any(v.address, u64::from(v.size)).map(ShadowHandle).unwrap();
-            
-            let Some(shadow) = shadow else {
-                return false;
+            let shadow: crate::shadow::ShadowHandle = match crate::shadow::find_any_handle(v.address, u64::from(v.size)) {
+                Some(s) => s,
+                None => return false,
             };
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
