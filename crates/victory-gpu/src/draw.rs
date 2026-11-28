@@ -511,15 +511,14 @@ fn heap_spread() -> bool {
 /// ([`State::heap_buffers`]), by slot.
 #[cfg(all(windows, feature = "native-memory"))]
 type HeapView = (crate::shadow::ShadowHandle, u64, u64);
-#[cfg(not(all(windows, feature = "native-memory")))]
-type HeapView<T> = (std::sync::Arc<T>, u64, u64);
-
 #[cfg(all(windows, feature = "native-memory"))]
 type HeapSpan = (crate::shadow::ShadowHandle, u64, u64);
 
 #[cfg(not(all(windows, feature = "native-memory")))]
-struct HeapSpan<T> {
-    copy: std::sync::Arc<T>,
+type HeapView = (std::sync::Arc<crate::shadow::Shadow>, u64, u64);
+#[cfg(not(all(windows, feature = "native-memory")))]
+struct HeapSpan {
+    copy: std::sync::Arc<crate::shadow::Shadow>,
     starts: std::collections::BTreeSet<(u64, u32)>,
     ends: std::collections::BTreeSet<(u64, u32)>,
 }
@@ -532,21 +531,13 @@ pub(crate) struct HeapRanges {
 }
 
 #[cfg(not(all(windows, feature = "native-memory")))]
-pub(crate) struct HeapRanges<T> {
-    slots: Vec<Option<HeapView<T>>>,
-    copies: crate::host::ByCopy<HeapSpan<T>>,
+pub(crate) struct HeapRanges {
+    slots: Vec<Option<HeapView>>,
+    copies: crate::host::ByCopy<HeapSpan>,
     views: usize,
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 impl Default for HeapRanges {
-    fn default() -> Self {
-        Self { slots: Vec::new(), copies: Default::default(), views: 0 }
-    }
-}
-
-#[cfg(not(all(windows, feature = "native-memory")))]
-impl<T> Default for HeapRanges<T> {
     fn default() -> Self {
         Self { slots: Vec::new(), copies: Default::default(), views: 0 }
     }
@@ -627,15 +618,8 @@ impl HeapRanges {
 }
 
 #[cfg(not(all(windows, feature = "native-memory")))]
-impl<T> Default for HeapRanges<T> {
-    fn default() -> Self {
-        Self { slots: Vec::new(), copies: Default::default(), views: 0 }
-    }
-}
-
-#[cfg(not(all(windows, feature = "native-memory")))]
-impl<T> HeapRanges<T> {
-    fn set(&mut self, slot: u32, range: Option<HeapView<T>>) {
+impl HeapRanges {
+    fn set(&mut self, slot: u32, range: Option<HeapView>) {
         let index = slot as usize;
         if range.is_none() && index >= self.slots.len() {
             return;
@@ -643,7 +627,7 @@ impl<T> HeapRanges<T> {
         if index >= self.slots.len() {
             self.slots.resize_with(index + 1, || None);
         }
-        let key = |copy: &std::sync::Arc<T>| std::sync::Arc::as_ptr(copy) as usize;
+        let key = |copy: &std::sync::Arc<crate::shadow::Shadow>| std::sync::Arc::as_ptr(copy) as usize;
         let old = &mut self.slots[index];
         if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
             && std::sync::Arc::ptr_eq(a, b) && from == start && to == end
@@ -686,29 +670,111 @@ impl<T> HeapRanges<T> {
         }
     }
 
-    fn spans(&self) -> impl Iterator<Item = (&std::sync::Arc<T>, u64, u64)> {
+    fn spans(&self) -> impl Iterator<Item = (&std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
         self.copies.values().filter_map(|span| {
             Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
         })
     }
 
     #[cfg(test)]
-    fn ranges(&self) -> impl Iterator<Item = &HeapView<T>> {
+    fn ranges(&self) -> impl Iterator<Item = &HeapView> {
         self.slots.iter().flatten()
     }
 }
 
 #[cfg(test)]
 mod heap_range_tests {
-    use super::{HEAP_ROUND, HeapRanges};
+    use super::HEAP_ROUND;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    /// Test-only generic HeapRanges for testing with dummy types.
+    struct TestHeapRanges<T> {
+        slots: Vec<Option<(Arc<T>, u64, u64)>>,
+        copies: std::collections::HashMap<usize, TestHeapSpan<T>>,
+        views: usize,
+    }
+
+    struct TestHeapSpan<T> {
+        copy: Arc<T>,
+        starts: BTreeSet<(u64, u32)>,
+        ends: BTreeSet<(u64, u32)>,
+    }
+
+    impl<T> Default for TestHeapRanges<T> {
+        fn default() -> Self {
+            Self { slots: Vec::new(), copies: Default::default(), views: 0 }
+        }
+    }
+
+    impl<T> TestHeapRanges<T> {
+        fn set(&mut self, slot: u32, range: Option<(Arc<T>, u64, u64)>) {
+            let index = slot as usize;
+            if range.is_none() && index >= self.slots.len() {
+                return;
+            }
+            if index >= self.slots.len() {
+                self.slots.resize_with(index + 1, || None);
+            }
+            let key = |copy: &Arc<T>| Arc::as_ptr(copy) as usize;
+            let old = &mut self.slots[index];
+            if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
+                && Arc::ptr_eq(a, b) && from == start && to == end
+            {
+                return;
+            }
+            if let Some((copy, from, to)) = old.take() {
+                let id = key(&copy);
+                let span = self.copies.get_mut(&id).expect("slot's copy is indexed");
+                span.starts.remove(&(from, slot));
+                span.ends.remove(&(to, slot));
+                if span.starts.is_empty() {
+                    self.copies.remove(&id);
+                }
+                self.views -= 1;
+            }
+            if let Some((copy, from, to)) = &range {
+                let span = self.copies.entry(key(copy)).or_insert_with(|| TestHeapSpan {
+                    copy: copy.clone(), starts: Default::default(), ends: Default::default(),
+                });
+                span.starts.insert((*from, slot));
+                span.ends.insert((*to, slot));
+                self.views += 1;
+            }
+            *old = range;
+        }
+
+        fn prune_part(&mut self, part: u32, parts: u32, present: &[u32]) {
+            let mut present = present.iter().copied().peekable();
+            for index in (part as usize..self.slots.len()).step_by(parts as usize) {
+                let slot = index as u32;
+                while present.peek().is_some_and(|&next| next < slot) {
+                    present.next();
+                }
+                if self.slots[index].is_some() && present.peek() != Some(&slot) {
+                    self.set(slot, None);
+                }
+            }
+        }
+
+        fn spans(&self) -> impl Iterator<Item = (&Arc<T>, u64, u64)> {
+            self.copies.values().filter_map(|span| {
+                Some((&span.copy, span.starts.first()?.0, span.ends.last()?.0))
+            })
+        }
+
+        fn ranges(&self) -> impl Iterator<Item = &(Arc<T>, u64, u64)> {
+            self.slots.iter().flatten()
+        }
+    }
 
     /// Round by round every slot is looked at again once, whatever was
     /// written between, and what a slot holds is what was found last.
     #[test]
     fn every_slot_is_looked_at_again_in_a_round() {
         const SLOTS: u32 = 1000;
-        let mut ranges = HeapRanges::default();
-        let copy = std::sync::Arc::new(());
+        let mut ranges = TestHeapRanges::default();
+        let copy = Arc::new(());
         ranges.set(7, None);
         assert_eq!(ranges.ranges().count(), 0);
         for slot in (0..SLOTS).step_by(3) {
@@ -732,10 +798,9 @@ mod heap_range_tests {
 
     #[test]
     fn spans_follow_replacements_and_absent_slots() {
-        use std::sync::Arc;
         let (a, b) = (Arc::new(1), Arc::new(2));
-        let mut ranges = HeapRanges::default();
-        let spans = |r: &HeapRanges<i32>| {
+        let mut ranges = TestHeapRanges::default();
+        let spans = |r: &TestHeapRanges<i32>| {
             let mut found: Vec<_> = r.spans().map(|(copy, from, to)| (**copy, from, to)).collect();
             found.sort_unstable();
             found
@@ -760,9 +825,8 @@ mod heap_range_tests {
     #[ignore]
     fn spans_of_a_pass() {
         use std::collections::HashMap;
-        use std::sync::Arc;
         let copies: Vec<Arc<u64>> = (0..4400).map(Arc::new).collect();
-        let (mut table, mut slots) = (HashMap::new(), HeapRanges::default());
+        let (mut table, mut slots) = (HashMap::new(), TestHeapRanges::default());
         for slot in 0..72_000u32 {
             let copy = &copies[slot as usize * 7919 % 4400];
             table.insert(slot, (copy.clone(), u64::from(slot), u64::from(slot) + 64));

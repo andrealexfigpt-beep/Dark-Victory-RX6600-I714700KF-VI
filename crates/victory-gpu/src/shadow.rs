@@ -93,6 +93,11 @@ impl ShadowHandle {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
     }
+
+    /// The bytes of the host buffer (resource width).
+    pub fn width(&self) -> u64 {
+        self.0.width()
+    }
 }
 
 #[cfg(all(windows, not(feature = "native-memory")))]
