@@ -3546,7 +3546,7 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(base, width)
             } else {
-                crate::shadow::find(base, width).map(Into::into)
+                crate::shadow::find(base, width).map(ShadowHandle::Legacy)
             }
         }
     {
@@ -3556,7 +3556,7 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
         if crate::memory_backend::is_native_backend_active() {
             crate::shadow::find_handle(address, len)
         } else {
-            crate::shadow::find(address, len).map(Into::into)
+            crate::shadow::find(address, len).map(ShadowHandle::Legacy)
         }
     }?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
@@ -3574,13 +3574,13 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::
         && address >= base
         && address - base < width.max(1)
         && let Some(shadow) = {
-            crate::shadow::find(base, width).map(Into::into)
+            crate::shadow::find(base, width).map(ShadowHandle::Legacy)
         }
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
     let shadow = {
-        crate::shadow::find(address, len).map(Into::into)
+        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
     }?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
@@ -4145,10 +4145,10 @@ fn make_twinned(
                 if crate::memory_backend::is_native_backend_active() {
                     crate::shadow::find_handle(address, u64::from(size))
                 } else {
-                    crate::shadow::find(address, u64::from(size)).map(Into::into)
+                    crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy)
                 }
                 #[cfg(not(all(windows, feature = "native-memory")))]
-                crate::shadow::find(address, u64::from(size)).map(Into::into)
+                crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy)
             }?;
             let gpu = shadow.gpu(address);
             if gpu % 256 != 0 {

@@ -1824,12 +1824,12 @@ impl State {
                     s
                 })
             } else {
-                crate::shadow::find(a, 1).map(Into::into)
+                crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
             }
         };
         #[cfg(not(all(windows, feature = "native-memory")))]
         let find = |a: u64| {
-            crate::shadow::find(a, 1).map(Into::into)
+            crate::shadow::find(a, 1).map(ShadowHandle::Legacy)
         };
         let ready = |a: u64, s: &crate::shadow::ShadowHandle| {
             let len = s.left(a).min(limit);

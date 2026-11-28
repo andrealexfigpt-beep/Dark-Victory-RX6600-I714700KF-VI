@@ -421,6 +421,12 @@ struct UploadRing {
     pending: Mutex<Vec<(u64, u64, u64)>>,
 }
 
+// SAFETY: UploadRing contains a raw pointer (mapped_ptr) but all access is protected
+// by the Mutex<pending> and AtomicU64 operations. The mapped pointer is a valid
+// mapped upload buffer that is only accessed by the thread that allocated it.
+unsafe impl Send for UploadRing {}
+unsafe impl Sync for UploadRing {}
+
 impl UploadRing {
     fn new(device: &ID3D12Device, size: u64) -> anyhow::Result<Self> {
         let desc = D3D12_RESOURCE_DESC {
@@ -583,10 +589,15 @@ struct ReadbackRing {
     read_offset: AtomicU64,
     fence: ID3D12Fence,
     fence_value: AtomicU64,
-    fence_event: std::ptr::NullMut,
+    fence_event: HANDLE,
     /// Pending allocations: (offset, size, fence_value).
     pending: Mutex<Vec<(u64, u64, u64)>>,
 }
+
+// SAFETY: ReadbackRing contains a raw pointer (mapped_ptr) but all access is protected
+// by the Mutex<pending> and AtomicU64 operations.
+unsafe impl Send for ReadbackRing {}
+unsafe impl Sync for ReadbackRing {}
 
 impl ReadbackRing {
     fn new(device: &ID3D12Device, size: u64) -> anyhow::Result<Self> {
@@ -766,6 +777,12 @@ pub struct NativeMemory {
     /// Statistics.
     stats: NativeMemoryStats,
 }
+
+// SAFETY: NativeMemory contains raw pointers in UploadRing and ReadbackRing,
+// but all access to those is protected by OnceLock and Mutex. The Arc<NativeMemory>
+// in OnceLock is only accessed through thread-safe operations.
+unsafe impl Send for NativeMemory {}
+unsafe impl Sync for NativeMemory {}
 
 /// A resource deferred for destruction after GPU fence completion.
 struct DeferredResource {
@@ -1985,7 +2002,7 @@ impl NativeShadow {
     }
 
     /// Bring `len` bytes at `address` up to date when `list` is submitted.
-    pub fn refresh(&self, list: &crate::list::HostList, address: u64, len: u64) {
+    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
         let len = len.min(self.title_va + self.len - address);
         // Read data from title CPU memory and upload to GPU
         let offset = address - self.title_va;

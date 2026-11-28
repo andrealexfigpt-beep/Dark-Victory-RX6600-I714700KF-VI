@@ -252,6 +252,10 @@ pub struct NativeBackend {
     inner: Arc<crate::native_mem::NativeMemory>,
 }
 
+// SAFETY: NativeBackend wraps Arc<NativeMemory> which implements Send + Sync.
+unsafe impl Send for NativeBackend {}
+unsafe impl Sync for NativeBackend {}
+
 #[cfg(all(windows, feature = "native-memory"))]
 impl NativeBackend {
     pub fn new(device: Arc<ID3D12Device>, copy_queue: Arc<ID3D12CommandQueue>) -> anyhow::Result<Self> {
