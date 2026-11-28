@@ -29,8 +29,6 @@ diagnostics = [
     "victory-loader/diagnostics",
     "victory-shader/diagnostics",
 ]
-# Experimental native Windows memory backend (replaces unified-memory translation).
-native-memory = ["victory-hle/native-memory"]
 
 [lints]
 workspace = true
