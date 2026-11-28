@@ -3,7 +3,6 @@
 //! These tests create real shaders, pipelines, execute GPU work, and
 //! verify pixel/buffer results via readback. Windows CI or local hardware executes.
 
-#[cfg(all(windows, feature = "native-memory"))]
 mod synthetic_rendering_tests {
     use std::sync::Arc;
     use std::time::Duration;

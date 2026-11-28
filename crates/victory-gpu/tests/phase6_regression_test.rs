@@ -1,6 +1,5 @@
 //! Regression tests and benchmarks for Phase 6 Native Optimization.
 
-#[cfg(all(windows, feature = "native-memory"))]
 mod phase6_regression_tests {
     use std::time::{Duration, Instant};
     use std::sync::Arc;
@@ -265,7 +264,6 @@ mod phase6_regression_tests {
     }
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
 mod phase6_benchmarks {
     use std::time::Instant;
     use std::sync::Arc;

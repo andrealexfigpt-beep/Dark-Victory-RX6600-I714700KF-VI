@@ -1,7 +1,6 @@
 //! Phase 4 verification tests for D3D12 descriptor heap limits, fence-safe LRU eviction,
 //! and cross-queue synchronization.
 
-#[cfg(all(windows, feature = "native-memory"))]
 mod phase4_verification_tests {
     use std::sync::Arc;
 

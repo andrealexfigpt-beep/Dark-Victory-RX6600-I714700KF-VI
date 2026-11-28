@@ -8,7 +8,6 @@
 //! - Memory consumption and allocation lookup performance
 //! - Aliasing and resource lifetime correctness
 
-#[cfg(all(windows, feature = "native-memory"))]
 mod native_mem_tests {
     use std::sync::Arc;
     use std::thread;
@@ -527,7 +526,6 @@ mod native_mem_tests {
 }
 
 // Synthetic benchmarks comparing legacy vs native backends
-#[cfg(all(windows, feature = "native-memory"))]
 mod benchmarks {
     use super::*;
     use std::time::Instant;
@@ -818,7 +816,6 @@ mod legacy_benchmarks {
 }
 
 // Comparative benchmarks: run both backends under identical workloads
-#[cfg(all(windows, feature = "native-memory"))]
 mod comparative_benchmarks {
     use super::*;
     use std::time::Instant;
