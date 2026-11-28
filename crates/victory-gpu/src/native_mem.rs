@@ -1923,7 +1923,9 @@ impl NativeMemory {
     ) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
         let mut info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
         unsafe {
-            self.device.cast::<ID3D12Device5>()?.GetRaytracingAccelerationStructurePrebuildInfo(build_inputs, &mut info);
+            if let Ok(device5) = self.device.cast::<ID3D12Device5>() {
+                device5.GetRaytracingAccelerationStructurePrebuildInfo(build_inputs, &mut info);
+            }
         }
         info
     }
