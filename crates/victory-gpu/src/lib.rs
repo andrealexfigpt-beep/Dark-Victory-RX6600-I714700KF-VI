@@ -77,7 +77,6 @@ mod safecopy;
 mod sampler;
 #[cfg(windows)]
 pub mod shader_cache;
-#[cfg(all(windows, feature = "native-memory"))]
 pub mod shader_perm;
 #[cfg(windows)]
 mod memory;
@@ -105,10 +104,9 @@ mod watch;
 #[cfg(windows)]
 mod texback;
 
-/// Native Windows memory backend (experimental).
+/// Native Windows memory backend.
 /// Replaces the unified-memory translation layer with direct D3D12 allocations.
 #[cfg(windows)]
-#[cfg(feature = "native-memory")]
 pub mod native_mem;
 
 #[cfg(windows)]
@@ -136,14 +134,14 @@ pub use watch::{
     writing as kernel_will_write,
 };
 
-/// Native memory backend exports (feature = "native-memory").
-#[cfg(all(windows, feature = "native-memory"))]
+/// Native memory backend exports.
+#[cfg(windows)]
 pub use native_mem::{
     NativeMemory, init_native_memory, native_memory, is_native_memory_active,
     NativeShadow, PAGE as NATIVE_PAGE, MAX_TITLE_PAGES as NATIVE_MAX_TITLE_PAGES,
 };
 
-/// Memory backend abstraction (legacy vs native).
+/// Memory backend abstraction.
 #[cfg(windows)]
 pub mod memory_backend;
 #[cfg(windows)]

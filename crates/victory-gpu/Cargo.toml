@@ -29,11 +29,21 @@ fastrand = "2.0"
 [features]
 # Debugging switches (frame capture, the host debug layer, per-draw data).
 diagnostics = []
-# Experimental native Windows memory backend (replaces unified-memory translation).
-native-memory = ["dashmap", "serde_json"]
 
 [lints]
 workspace = true
+
+[dependencies]
+blake3.workspace = true
+zlib-rs.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+victory-formats.workspace = true
+victory-pipeline.workspace = true
+victory-shader.workspace = true
+serde.workspace = true
+serde_json = { version = "1.0" }
+dashmap = { version = "6", default-features = false }
 
 [[bench]]
 name = "shaders_bench"
