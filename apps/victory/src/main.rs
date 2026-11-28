@@ -239,12 +239,20 @@ fn main() -> Result<()> {
             if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
                 victory_shader::emit::set_host_max_wave(n);
             }
+            #[cfg(windows)]
             if let Some(file) = warm {
                 return translate::warm(paths, &file, jobs);
             }
+            #[cfg(not(windows))]
+            if warm.is_some() {
+                return Err(anyhow::anyhow!("--warm requires Windows"));
+            }
             translate::run(paths, validate, pipelines, list, jobs)
         }
+        #[cfg(windows)]
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        #[cfg(not(windows))]
+        Command::Shaders { .. } => Err(anyhow::anyhow!("shaders requires Windows")),
         #[cfg(windows)]
         Command::Precompile { paths, jobs, manifest } => translate::precompile_manifest(paths, jobs, manifest),
         #[cfg(windows)]
