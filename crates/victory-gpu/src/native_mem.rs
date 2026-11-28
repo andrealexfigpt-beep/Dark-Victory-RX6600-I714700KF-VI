@@ -105,7 +105,7 @@ struct GpuResourceBinding {
     /// The D3D12 resource (DEFAULT heap for GPU access).
     resource: ID3D12Resource,
     /// GPU virtual address of the resource.
-    gpu_va: u64,
+    pub gpu_va: u64,
     /// Whether this resource can be written by shaders (UAV).
     uav: bool,
     /// Resource dimension (buffer, texture1D, texture2D, texture3D).
@@ -488,7 +488,7 @@ impl UploadRing {
     /// Returns (offset, mapped_ptr) or None if full (caller should wait and retry).
     /// Implements fence-safe wraparound: waits for oldest pending allocation
     /// to complete before reusing its space.
-    fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+    pub pub fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
         let size = size.next_multiple_of(alignment);
         
         // Try to allocate without wraparound first
@@ -657,7 +657,7 @@ impl ReadbackRing {
         })
     }
 
-    fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
+    pub fn allocate(&self, size: u64, alignment: u64) -> Option<(u64, *mut u8)> {
         let size = size.next_multiple_of(alignment);
         
         // Try to allocate without wraparound first
@@ -918,10 +918,10 @@ impl NativeMemory {
             // Commit memory
             let ptr = unsafe {
                 VirtualAlloc(
-                    aligned_va as *mut _,
+                    aligned_va as *mut std::ffi::c_void,
                     size as usize,
                     MEM_RESERVE | MEM_COMMIT,
-                    PAGE_PROTECTION_FLAGS(protect),
+                    protect,
                 )
             };
             if ptr.is_null() {
@@ -1415,7 +1415,7 @@ impl NativeMemory {
             
             let src_ptr = sub_data.pData as *const u8;
             let src_row_pitch = if sub_data.RowPitch > 0 { sub_data.RowPitch as u64 } else { footprint_row_pitch as u64 };
-            let src_slice_pitch = if sub_data.SlicePitch > 0 { sub_data.SlicePitch } else { total_bytes };
+            let src_slice_pitch = if sub_data.SlicePitch > 0 { sub_data.SlicePitch as u64 } else { total_bytes };
             
             let dst_ptr = unsafe { ring_ptr.add(current_ring_offset as usize) };
             
@@ -1667,7 +1667,7 @@ impl NativeMemory {
         uav: bool,
     ) -> anyhow::Result<(ID3D12Resource, u64, u64, Option<ID3D12Heap>)> {
         let size = self.calculate_texture_size(desc);
-        let alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        let alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT as u64;
         let flags = if uav {
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
         } else {
@@ -1828,7 +1828,7 @@ impl NativeMemory {
         let heap_offset = source_binding.heap_offset;
 
         let size = self.calculate_texture_size(desc);
-        let alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        let alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT as u64;
         let flags = if uav {
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
         } else {
@@ -1922,7 +1922,7 @@ impl NativeMemory {
     ) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
         let mut info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
         unsafe {
-            self.device.GetRaytracingAccelerationStructurePrebuildInfo(build_inputs, &mut info);
+            self.device.as_ref().GetRaytracingAccelerationStructurePrebuildInfo(build_inputs, &mut info);
         }
         info
     }
