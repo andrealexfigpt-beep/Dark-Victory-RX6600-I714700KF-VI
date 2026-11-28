@@ -48,6 +48,51 @@ use windows::Win32::System::Memory::*;
 #[cfg(windows)]
 use windows::core::Interface;
 
+#[cfg(not(windows))]
+mod stubs {
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone)]
+    pub struct Host;
+    pub fn host() -> Option<Arc<Host>> { None }
+
+    #[derive(Debug, Clone)]
+    pub struct MemoryBudget {
+        pub vram_budget: u64,
+        pub vram_used: u64,
+        pub shared_budget: u64,
+        pub shared_used: u64,
+        pub evictions: u64,
+        pub allocation_failures: u64,
+    }
+    pub fn init_memory_manager(_device: &(), _adapter: ()) {}
+    pub fn memory_stats() -> MemoryBudget { MemoryBudget { vram_budget: 0, vram_used: 0, shared_budget: 0, shared_used: 0, evictions: 0, allocation_failures: 0 } }
+
+    pub fn init_command_pool(_device: &()) -> Result<(), String> { Ok(()) }
+    pub fn init_descriptor_pools(_device: &()) -> Result<(), String> { Ok(()) }
+    pub fn set_binding_config(_config: ()) {}
+    pub fn init_barrier_tracker() {}
+    pub fn init_queue_manager(_device: &()) -> Result<(), String> { Ok(()) }
+    pub fn enable_persistence(_dir: std::path::PathBuf) {}
+    pub fn use_pipeline_cache(_dir: std::path::PathBuf) {}
+
+    pub type ID3D12QueryHeap = ();
+    pub type ID3D12Resource = ();
+
+    #[derive(Debug, Clone)]
+    pub struct ShaderStats {
+        pub total_uses: u64,
+        pub total_permutations: u32,
+    }
+    pub fn stats() -> ShaderStats { ShaderStats { total_uses: 0, total_permutations: 0 } }
+
+    pub fn use_console_timers() {}
+    pub fn set_main_image(_id: u32) {}
+}
+
+#[cfg(not(windows))]
+use stubs::{Host, MemoryBudget, ID3D12QueryHeap, ID3D12Resource, host, init_memory_manager, memory_stats, init_command_pool, init_descriptor_pools, set_binding_config, init_barrier_tracker, init_queue_manager, enable_persistence, use_pipeline_cache, stats as shader_stats, use_console_timers, set_main_image};
+
 /// Execution mode for the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutionMode {
@@ -219,7 +264,7 @@ pub struct SubsystemProfile {
 }
 
 /// Runtime profiling snapshot.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct RuntimeProfile {
     pub timestamp: Instant,
     pub memory: SubsystemProfile,
@@ -227,6 +272,19 @@ pub struct RuntimeProfile {
     pub graphics: SubsystemProfile,
     pub platform: SubsystemProfile,
     pub background: SubsystemProfile,
+}
+
+impl Default for RuntimeProfile {
+    fn default() -> Self {
+        Self {
+            timestamp: Instant::now(),
+            memory: SubsystemProfile::default(),
+            shader: SubsystemProfile::default(),
+            graphics: SubsystemProfile::default(),
+            platform: SubsystemProfile::default(),
+            background: SubsystemProfile::default(),
+        }
+    }
 }
 
 /// Background task for budget-aware scheduling.
@@ -243,13 +301,13 @@ struct BackgroundTask {
 pub struct NativeRuntime {
     config: RuntimeConfig,
     hardware: HardwareCapabilities,
-    initialized: AtomicBool,
-    execution_mode: RwLock<ExecutionMode>,
-    profiling_enabled: AtomicBool,
-    profiles: Mutex<HashMap<String, RuntimeProfile>>,
-    background_tasks: Mutex<Vec<BackgroundTask>>,
+    initialized: Arc<AtomicBool>,
+    execution_mode: Arc<RwLock<ExecutionMode>>,
+    profiling_enabled: Arc<AtomicBool>,
+    profiles: Arc<Mutex<HashMap<String, RuntimeProfile>>>,
+    background_tasks: Arc<Mutex<Vec<BackgroundTask>>>,
     background_thread: Option<std::thread::JoinHandle<()>>,
-    shutdown_requested: AtomicBool,
+    shutdown_requested: Arc<AtomicBool>,
     #[cfg(windows)]
     host: Option<Arc<Host>>,
 }
@@ -260,13 +318,13 @@ impl NativeRuntime {
         Self {
             config,
             hardware: HardwareCapabilities::default(),
-            initialized: AtomicBool::new(false),
-            execution_mode: RwLock::new(ExecutionMode::Native),
-            profiling_enabled: AtomicBool::new(true),
-            profiles: Mutex::new(HashMap::new()),
-            background_tasks: Mutex::new(Vec::new()),
+            initialized: Arc::new(AtomicBool::new(false)),
+            execution_mode: Arc::new(RwLock::new(ExecutionMode::Native)),
+            profiling_enabled: Arc::new(AtomicBool::new(true)),
+            profiles: Arc::new(Mutex::new(HashMap::new())),
+            background_tasks: Arc::new(Mutex::new(Vec::new())),
             background_thread: None,
-            shutdown_requested: AtomicBool::new(false),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(windows)]
             host: None,
         }
@@ -334,191 +392,221 @@ impl NativeRuntime {
     }
 
     /// Detect hardware capabilities.
-    #[cfg(windows)]
     fn detect_hardware_capabilities(&mut self) -> Result<(), String> {
-        let host_guard = host().ok_or("Failed to get host")?;
-        let device = &host_guard.device;
+        #[cfg(windows)]
+        {
+            let host_guard = host().ok_or("Failed to get host")?;
+            let device = &host_guard.device;
 
-        // Query adapter info
-        let mut adapter_luid = None;
-        if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(0) } {
-            if let Ok(adapter) = factory.EnumAdapterByLuid::<windows::Win32::Graphics::Dxgi::IDXGIAdapter3>(host_guard.device.GetAdapterLuid()) {
-                if let Ok(desc) = adapter.GetDesc1() {
-                    self.hardware.vendor_id = desc.VendorId;
-                    self.hardware.device_id = desc.DeviceId;
-                    adapter_luid = Some(desc.AdapterLuid);
-                }
-            }
-
-        // Query video memory budgets
-        if let Some(luid) = adapter_luid {
+            // Query adapter info
+            let mut adapter_luid = None;
             if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(0) } {
-                if let Ok(adapter) = factory.EnumAdapterByLuid::<windows::Win32::Graphics::Dxgi::IDXGIAdapter3>(luid) {
-                    let mut local_info: windows::Win32::Graphics::Dxgi::DXGI_QUERY_VIDEO_MEMORY_INFO = Default::default();
-                    if adapter.QueryVideoMemoryInfo(0, windows::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local_info).is_ok() {
-                        self.hardware.vram_budget = local_info.Budget;
-                    }
-                    let mut non_local_info: windows::Win32::Graphics::Dxgi::DXGI_QUERY_VIDEO_MEMORY_INFO = Default::default();
-                    if adapter.QueryVideoMemoryInfo(0, windows::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut non_local_info).is_ok() {
-                        self.hardware.shared_memory_budget = non_local_info.Budget;
+                if let Ok(adapter) = factory.EnumAdapterByLuid::<windows::Win32::Graphics::Dxgi::IDXGIAdapter3>(host_guard.device.GetAdapterLuid()) {
+                    if let Ok(desc) = adapter.GetDesc1() {
+                        self.hardware.vendor_id = desc.VendorId;
+                        self.hardware.device_id = desc.DeviceId;
+                        adapter_luid = Some(desc.AdapterLuid);
                     }
                 }
             }
+
+            // Query video memory budgets
+            if let Some(luid) = adapter_luid {
+                if let Ok(factory) = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory2::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>(0) } {
+                    if let Ok(adapter) = factory.EnumAdapterByLuid::<windows::Win32::Graphics::Dxgi::IDXGIAdapter3>(luid) {
+                        let mut local_info: windows::Win32::Graphics::Dxgi::DXGI_QUERY_VIDEO_MEMORY_INFO = Default::default();
+                        if adapter.QueryVideoMemoryInfo(0, windows::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local_info).is_ok() {
+                            self.hardware.vram_budget = local_info.Budget;
+                        }
+                        let mut non_local_info: windows::Win32::Graphics::Dxgi::DXGI_QUERY_VIDEO_MEMORY_INFO = Default::default();
+                        if adapter.QueryVideoMemoryInfo(0, windows::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut non_local_info).is_ok() {
+                            self.hardware.shared_memory_budget = non_local_info.Budget;
+                        }
+                    }
+                }
+            }
+
+            // Query D3D12 options
+            let mut options1 = windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+            if device.CheckFeatureSupport(
+                windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut options1).cast(),
+                size_of_val(&options1) as u32,
+            ).is_ok() {
+                self.hardware.max_wave_lane_count = options1.WaveLaneCountMax;
+                self.hardware.min_wave_lane_count = options1.WaveLaneCountMin;
+            }
+
+            let mut options7 = windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
+            if device.CheckFeatureSupport(
+                windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_D3D12_OPTIONS7,
+                (&raw mut options7).cast(),
+                size_of_val(&options7) as u32,
+            ).is_ok() {
+                self.hardware.supports_mesh_shaders = options7.MeshShaderTier != windows::Win32::Graphics::Direct3D12::D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
+            }
+
+            let mut options2 = windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS2::default();
+            if device.CheckFeatureSupport(
+                windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_D3D12_OPTIONS2,
+                (&raw mut options2).cast(),
+                size_of_val(&options2) as u32,
+            ).is_ok() {
+                self.hardware.supports_depth_bounds = options2.DepthBoundsTestSupported.as_bool();
+            }
+
+            // Check RDNA
+            let amd_vendor = self.hardware.vendor_id == 0x1002; // AMD
+            self.hardware.is_rdna = amd_vendor && self.hardware.min_wave_lane_count == 32 && self.hardware.max_wave_lane_count == 64;
+            self.hardware.is_rdna2 = self.hardware.is_rdna && self.hardware.device_id >= 0x7300 && self.hardware.device_id <= 0x73FF; // Navi 2x
+
+            // CPU info
+            let mut sys_info = windows::Win32::System::SystemInformation::SYSTEM_INFO::default();
+            unsafe { windows::Win32::System::SystemInformation::GetSystemInfo(&mut sys_info) };
+            self.hardware.cpu_core_count = sys_info.dwNumberOfProcessors;
+            self.hardware.cpu_logical_processors = sys_info.dwNumberOfProcessors; // Simplified
+
+            tracing::info!(
+                vendor = format_args!("{:#06x}", self.hardware.vendor_id),
+                device = format_args!("{:#06x}", self.hardware.device_id),
+                vram_mb = self.hardware.vram_budget / (1024 * 1024),
+                shared_mb = self.hardware.shared_memory_budget / (1024 * 1024),
+                wave_min = self.hardware.min_wave_lane_count,
+                wave_max = self.hardware.max_wave_lane_count,
+                rdna = self.hardware.is_rdna,
+                rdna2 = self.hardware.is_rdna2,
+                mesh = self.hardware.supports_mesh_shaders,
+                depth_bounds = self.hardware.supports_depth_bounds,
+                "Hardware capabilities detected"
+            );
         }
-
-        // Query D3D12 options
-        let mut options1 = windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
-        if device.CheckFeatureSupport(
-            windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_D3D12_OPTIONS1,
-            (&raw mut options1).cast(),
-            size_of_val(&options1) as u32,
-        ).is_ok() {
-            self.hardware.max_wave_lane_count = options1.WaveLaneCountMax;
-            self.hardware.min_wave_lane_count = options1.WaveLaneCountMin;
+        #[cfg(not(windows))]
+        {
+            // No hardware detection on non-Windows
         }
-
-        let mut options7 = windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
-        if device.CheckFeatureSupport(
-            windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_D3D12_OPTIONS7,
-            (&raw mut options7).cast(),
-            size_of_val(&options7) as u32,
-        ).is_ok() {
-            self.hardware.supports_mesh_shaders = options7.MeshShaderTier != windows::Win32::Graphics::Direct3D12::D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
-        }
-
-        let mut options2 = windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS2::default();
-        if device.CheckFeatureSupport(
-            windows::Win32::Graphics::Direct3D12::D3D12_FEATURE_D3D12_OPTIONS2,
-            (&raw mut options2).cast(),
-            size_of_val(&options2) as u32,
-        ).is_ok() {
-            self.hardware.supports_depth_bounds = options2.DepthBoundsTestSupported.as_bool();
-        }
-
-        // Check RDNA
-        let amd_vendor = self.hardware.vendor_id == 0x1002; // AMD
-        self.hardware.is_rdna = amd_vendor && self.hardware.min_wave_lane_count == 32 && self.hardware.max_wave_lane_count == 64;
-        self.hardware.is_rdna2 = self.hardware.is_rdna && self.hardware.device_id >= 0x7300 && self.hardware.device_id <= 0x73FF; // Navi 2x
-
-        // CPU info
-        let mut sys_info = windows::Win32::System::SystemInformation::SYSTEM_INFO::default();
-        unsafe { windows::Win32::System::SystemInformation::GetSystemInfo(&mut sys_info) };
-        self.hardware.cpu_core_count = sys_info.dwNumberOfProcessors;
-        self.hardware.cpu_logical_processors = sys_info.dwNumberOfProcessors; // Simplified
-
-        tracing::info!(
-            vendor = format_args!("{:#06x}", self.hardware.vendor_id),
-            device = format_args!("{:#06x}", self.hardware.device_id),
-            vram_mb = self.hardware.vram_budget / (1024 * 1024),
-            shared_mb = self.hardware.shared_memory_budget / (1024 * 1024),
-            wave_min = self.hardware.min_wave_lane_count,
-            wave_max = self.hardware.max_wave_lane_count,
-            rdna = self.hardware.is_rdna,
-            rdna2 = self.hardware.is_rdna2,
-            mesh = self.hardware.supports_mesh_shaders,
-            depth_bounds = self.hardware.supports_depth_bounds,
-            "Hardware capabilities detected"
-        );
-
         Ok(())
-        }
+    }
 
     /// Initialize Native Memory subsystem.
-    #[cfg(windows)]
     fn initialize_native_memory(&self) -> Result<(), String> {
-        let host_guard = host().ok_or("Failed to get host")?;
-        let device = host_guard.device.clone();
-        
-        // Create copy queue for memory operations
-        let copy_queue_desc = windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_DESC {
-            Type: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_LIST_TYPE_COPY,
-            Priority: 0,
-            Flags: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_FLAGS(0),
-            NodeMask: 0,
-        };
-        let copy_queue: windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue = unsafe { 
-            device.CreateCommandQueue(&copy_queue_desc) 
-        }.map_err(|e| format!("Failed to create copy queue: {}", e))?;
+        #[cfg(windows)]
+        {
+            let host_guard = host().ok_or("Failed to get host")?;
+            let device = host_guard.device.clone();
+            
+            // Create copy queue for memory operations
+            let copy_queue_desc = windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_DESC {
+                Type: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_LIST_TYPE_COPY,
+                Priority: 0,
+                Flags: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_FLAGS(0),
+                NodeMask: 0,
+            };
+            let copy_queue: windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue = unsafe { 
+                device.CreateCommandQueue(&copy_queue_desc) 
+            }.map_err(|e| format!("Failed to create copy queue: {}", e))?;
 
-        // Initialize memory manager with adapter
-        let adapter = host_guard.adapter.clone();
-        init_memory_manager(&device, adapter);
+            // Initialize memory manager with adapter
+            let adapter = host_guard.adapter.clone();
+            init_memory_manager(&device, adapter);
 
-        tracing::info!("Native Memory initialized");
+            tracing::info!("Native Memory initialized");
+        }
+        #[cfg(not(windows))]
+        {
+            // No native memory on non-Windows
+        }
         Ok(())
     }
 
     /// Initialize Native Shaders subsystem.
-    #[cfg(windows)]
     fn initialize_native_shaders(&self) -> Result<(), String> {
-        // Set up shader cache directory
-        let cache_dir = self.config.shader_cache_dir.clone()
-            .unwrap_or_else(|| std::env::temp_dir().join("victory_shader_cache"));
-        
-        std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create shader cache dir: {}", e))?;
-        
-        // Enable shader permutation persistence
-        if self.config.enable_permutation_persistence {
-            let perm_dir = self.config.permutation_cache_dir.clone()
-                .unwrap_or_else(|| cache_dir.join("permutations"));
-            std::fs::create_dir_all(&perm_dir).ok();
-            enable_persistence(perm_dir);
-        }
+        #[cfg(windows)]
+        {
+            // Set up shader cache directory
+            let cache_dir = self.config.shader_cache_dir.clone()
+                .unwrap_or_else(|| std::env::temp_dir().join("victory_shader_cache"));
+            
+            std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create shader cache dir: {}", e))?;
+            
+            // Enable shader permutation persistence
+            if self.config.enable_permutation_persistence {
+                let perm_dir = self.config.permutation_cache_dir.clone()
+                    .unwrap_or_else(|| cache_dir.join("permutations"));
+                std::fs::create_dir_all(&perm_dir).ok();
+                enable_persistence(perm_dir);
+            }
 
-        // Enable shader cache
-        if self.config.enable_shader_cache {
-            use victory_gpu::shader_cache::use_shader_cache;
-            use_shader_cache(cache_dir);
-        }
+            // Enable shader cache
+            if self.config.enable_shader_cache {
+                use victory_gpu::shader_cache::use_shader_cache;
+                use_shader_cache(cache_dir);
+            }
 
-        tracing::info!("Native Shaders initialized");
+            tracing::info!("Native Shaders initialized");
+        }
+        #[cfg(not(windows))]
+        {
+            // No native shaders on non-Windows
+        }
         Ok(())
     }
 
     /// Initialize Native Graphics subsystem.
-    #[cfg(windows)]
     fn initialize_native_graphics(&mut self) -> Result<(), String> {
-        let host_guard = host().ok_or("Failed to get host")?;
-        let device = &host_guard.device;
+        #[cfg(windows)]
+        {
+            let host_guard = host().ok_or("Failed to get host")?;
+            let device = &host_guard.device;
 
-        // Initialize descriptor pools
-        init_descriptor_pools(device)?;
+            // Initialize descriptor pools
+            init_descriptor_pools(device)?;
 
-        // Initialize command pool
-        init_command_pool(device)?;
+            // Initialize command pool
+            init_command_pool(device)?;
 
-        // Initialize barrier tracker
-        init_barrier_tracker();
+            // Initialize barrier tracker
+            init_barrier_tracker();
 
-        // Initialize async queue manager
-        init_queue_manager(device)?;
+            // Initialize async queue manager
+            init_queue_manager(device)?;
 
-        // Set binding configuration (native defaults)
-        set_binding_config(crate::host::binding::BindingConfig::native_default());
+            // Set binding configuration (native defaults)
+            set_binding_config(crate::host::binding::BindingConfig::native_default());
 
-        // Set up pipeline cache
-        if self.config.enable_pipeline_cache {
-            let pipeline_dir = self.config.pipeline_cache_dir.clone()
-                .unwrap_or_else(|| std::env::temp_dir().join("victory_pipeline_cache"));
-            std::fs::create_dir_all(&pipeline_dir).ok();
-            use_pipeline_cache(pipeline_dir);
+            // Set up pipeline cache
+            if self.config.enable_pipeline_cache {
+                let pipeline_dir = self.config.pipeline_cache_dir.clone()
+                    .unwrap_or_else(|| std::env::temp_dir().join("victory_pipeline_cache"));
+                std::fs::create_dir_all(&pipeline_dir).ok();
+                use_pipeline_cache(pipeline_dir);
+            }
+
+            // Store host reference
+            self.host = Some(Arc::new(host_guard.clone()));
+
+            tracing::info!("Native Graphics initialized");
         }
-
-        // Store host reference
-        self.host = Some(Arc::new(host_guard.clone()));
-
-        tracing::info!("Native Graphics initialized");
+        #[cfg(not(windows))]
+        {
+            // No native graphics on non-Windows
+        }
         Ok(())
     }
 
     /// Initialize Native Platform subsystem.
-    #[cfg(windows)]
     fn initialize_native_platform(&self) -> Result<(), String> {
-        // Platform subsystems (kernel, files, xaudio2, gameinput, dstorage)
-        // are automatically initialized when their modules are loaded
-        // through the HLE module registry
-        
-        tracing::info!("Native Platform initialized");
+        #[cfg(windows)]
+        {
+            // Platform subsystems (kernel, files, xaudio2, gameinput, dstorage)
+            // are automatically initialized when their modules are loaded
+            // through the HLE module registry
+            
+            tracing::info!("Native Platform initialized");
+        }
+        #[cfg(not(windows))]
+        {
+            // No native platform on non-Windows
+        }
         Ok(())
     }
 
@@ -547,7 +635,7 @@ impl NativeRuntime {
         let handle = std::thread::Builder::new()
             .name("victory-background".into())
             .spawn(move || {
-                let mut thread_pool = Vec::new();
+                let mut thread_pool: Vec<std::thread::JoinHandle<()>> = Vec::new();
                 let mut idle_count = 0;
                 
                 while !shutdown.load(Ordering::Acquire) {
@@ -619,11 +707,12 @@ impl NativeRuntime {
         let shutdown = self.shutdown_requested.clone();
         #[cfg(windows)]
         let host_opt = self.host.clone();
+        #[cfg(not(windows))]
+        let host_opt = None;
         
         std::thread::Builder::new()
             .name("victory-profiling".into())
             .spawn(move || {
-                #[cfg(windows)]
                 let (timestamp_query_heap, timestamp_buffer) = Self::create_timestamp_query_objects(&host_opt);
                 
                 while !shutdown.load(Ordering::Acquire) {
@@ -655,63 +744,69 @@ impl NativeRuntime {
     }
 
     /// Create GPU timestamp query objects for low-overhead GPU timing.
-    #[cfg(windows)]
     fn create_timestamp_query_objects(host_opt: &Option<Arc<Host>>) -> (Option<ID3D12QueryHeap>, Option<ID3D12Resource>) {
-        let host = match host_opt {
-            Some(h) => h,
-            None => return (None, None),
-        };
-        
-        let device = &host.device;
-        
-        // Create timestamp query heap
-        let query_heap_desc = D3D12_QUERY_HEAP_DESC {
-            Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
-            Count: 2, // Start and end timestamps
-            NodeMask: 0,
-        };
-        
-        let query_heap = match unsafe { device.CreateQueryHeap(&query_heap_desc) } {
-            Ok(h) => Some(h),
-            Err(_) => return (None, None),
-        };
-        
-        // Create readback buffer for timestamp data
-        let buffer_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: 16, // 2 * 8 bytes for two timestamps
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAGS(0),
-        };
-        
-        let heap_props = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_READBACK,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 1,
-            VisibleNodeMask: 1,
-        };
-        
-        let timestamp_buffer = match unsafe { 
-            device.CreateCommittedResource(
-                &heap_props,
-                D3D12_HEAP_FLAGS(0),
-                &buffer_desc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                None,
-            )
-        } {
-            Ok(b) => Some(b),
-            Err(_) => return (query_heap, None),
-        };
-        
-        (query_heap, timestamp_buffer)
+        #[cfg(windows)]
+        {
+            let host = match host_opt {
+                Some(h) => h,
+                None => return (None, None),
+            };
+            
+            let device = &host.device;
+            
+            // Create timestamp query heap
+            let query_heap_desc = D3D12_QUERY_HEAP_DESC {
+                Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
+                Count: 2, // Start and end timestamps
+                NodeMask: 0,
+            };
+            
+            let query_heap = match unsafe { device.CreateQueryHeap(&query_heap_desc) } {
+                Ok(h) => Some(h),
+                Err(_) => return (None, None),
+            };
+            
+            // Create readback buffer for timestamp data
+            let buffer_desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Alignment: 0,
+                Width: 16, // 2 * 8 bytes for two timestamps
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: DXGI_FORMAT_UNKNOWN,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                Flags: D3D12_RESOURCE_FLAGS(0),
+            };
+            
+            let heap_props = D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_READBACK,
+                CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+                MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+                CreationNodeMask: 1,
+                VisibleNodeMask: 1,
+            };
+            
+            let timestamp_buffer = match unsafe { 
+                device.CreateCommittedResource(
+                    &heap_props,
+                    D3D12_HEAP_FLAGS(0),
+                    &buffer_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                )
+            } {
+                Ok(b) => Some(b),
+                Err(_) => return (query_heap, None),
+            };
+            
+            (query_heap, timestamp_buffer)
+        }
+        #[cfg(not(windows))]
+        {
+            (None, None)
+        }
     }
 
     /// Collect a profiling snapshot with low-overhead GPU timing.
@@ -868,7 +963,8 @@ static NATIVE_RUNTIME: OnceLock<NativeRuntime> = OnceLock::new();
 pub fn initialize_runtime(config: RuntimeConfig) -> Result<&'static NativeRuntime, String> {
     let mut runtime = NativeRuntime::new(config);
     runtime.initialize()?;
-    NATIVE_RUNTIME.set(runtime).map_err(|_| "Runtime already initialized".into())
+    NATIVE_RUNTIME.set(runtime).map_err(|_| String::from("Runtime already initialized"))?;
+    NATIVE_RUNTIME.get().ok_or_else(|| String::from("Runtime not initialized"))
 }
 
 /// Get the global native runtime.
