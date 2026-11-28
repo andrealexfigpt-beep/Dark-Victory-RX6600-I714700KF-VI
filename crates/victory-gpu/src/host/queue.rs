@@ -145,7 +145,8 @@ impl QueueManager {
                 size_of_val(&options) as u32,
             )
         }.is_ok();
-        ok && options.IndependentFrontPanelVideo.as_bool() // Rough heuristic: async compute support
+        // Rough heuristic: async compute support - check for ROV support which implies async compute capability
+        ok && options.ROVsSupported.as_bool()
     }
 
     /// Check if device supports timeline semaphores.
@@ -191,7 +192,9 @@ impl QueueManager {
         
         let fence_value = queue.fence_value.fetch_add(1, Ordering::AcqRel);
         
-        unsafe { queue.queue.ExecuteCommandLists(lists) };
+        // Convert to slice of Option<ID3D12CommandList> as required by the windows crate API
+        let command_lists: Vec<Option<ID3D12CommandList>> = lists.iter().cloned().map(Some).collect();
+        unsafe { queue.queue.ExecuteCommandLists(&command_lists) };
         unsafe { queue.queue.Signal(&queue.fence, fence_value)? };
 
         // Update stats.

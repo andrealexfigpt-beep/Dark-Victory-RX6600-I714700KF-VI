@@ -919,7 +919,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         let _ = found[n].set(looked);
     });
     for (index, shows) in found.into_iter().filter_map(std::sync::OnceLock::into_inner).flatten() {
-        let range = shows.map(|(range, written)| {
+        let range: Option<HeapView<T>> = shows.map(|(range, written)| {
             if written {
                 unordered.push(range.clone());
             }
@@ -1893,7 +1893,7 @@ impl State {
                     host.null_raw_uav_at(index);
                 }
                 self.root_uav_slots
-                    .insert(key, (index, shadow.map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
                 (index, shadow)
             }
         };
@@ -1958,7 +1958,7 @@ impl State {
                 };
                 self.dynamic.push((key.0, index, 1));
                 self.root_srv_slots
-                    .insert(key, (index, shadow.map(|(_, s)| s.clone())));
+                    .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
                 match &shadow {
                     Some((a, s)) => {
                         // SAFETY: a live buffer.

@@ -193,6 +193,25 @@ impl MemoryManager {
         }
         
         // Detect ReBAR support (PCIe Resizable BAR).
+        // If adapter available, query actual budgets.
+        if let Some(ref adapter) = adapter {
+            let mut local_budget = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            if unsafe {
+                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local_budget)
+            }.is_ok() {
+                config.vram_budget = local_budget.Budget;
+                config.vram_reserve = (local_budget.Budget as f64 * 0.05) as u64; // 5% reserve
+            }
+            let mut non_local_budget = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            if unsafe {
+                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut non_local_budget)
+            }.is_ok() {
+                config.shared_budget = non_local_budget.Budget;
+                config.shared_reserve = (non_local_budget.Budget as f64 * 0.05) as u64;
+            }
+        }
+        
+        // Detect ReBAR support (PCIe Resizable BAR).
         let rebar = Self::detect_rebar_support(adapter.as_ref());
         
         // Detect GPU upload heap support (Direct3D12 feature).
@@ -589,17 +608,17 @@ impl MemoryManager {
         if let Some(ref adapter) = self.adapter {
             let mut config = self.config.write().unwrap();
             
-            if let Ok(mut budget) = unsafe {
-                let mut budget: DXGI_QUERY_VIDEO_MEMORY_INFO = std::mem::zeroed();
-                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut budget)
-            } {
-                config.vram_budget = budget.Budget;
+            let mut local_budget = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            if unsafe {
+                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local_budget)
+            }.is_ok() {
+                config.vram_budget = local_budget.Budget;
             }
-            if let Ok(mut budget) = unsafe {
-                let mut budget: DXGI_QUERY_VIDEO_MEMORY_INFO = std::mem::zeroed();
-                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut budget)
-            } {
-                config.shared_budget = budget.Budget;
+            let mut non_local_budget = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            if unsafe {
+                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut non_local_budget)
+            }.is_ok() {
+                config.shared_budget = non_local_budget.Budget;
             }
         }
     }

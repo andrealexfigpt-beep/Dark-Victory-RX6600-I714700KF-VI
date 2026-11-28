@@ -1308,7 +1308,7 @@ impl NativeMemory {
         // Wait for completion (synchronous for correctness)
         unsafe {
             self.copy_fence.SetEventOnCompletion(fence_value, self.copy_fence_event)?;
-            windows::Win32::Foundation::WaitForSingleObject(self.copy_fence_event, u32::MAX);
+            WaitForSingleObject(self.copy_fence_event, u32::MAX);
         }
 
         Ok(fence_value)
@@ -2012,7 +2012,7 @@ impl NativeShadow {
     }
 
     /// Shaders of `list` may write `[address, address + len)` of the copy.
-    pub fn gpu_writes(&self, list: &crate::list::HostList, address: u64, len: u64) {
+    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
         let len = len.min(self.title_va + self.len - address);
         let _ = self.backend.gpu_writes(self.title_va, address - self.title_va, len);
     }
