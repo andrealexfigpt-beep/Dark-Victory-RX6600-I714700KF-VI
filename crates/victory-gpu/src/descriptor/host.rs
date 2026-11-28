@@ -3298,16 +3298,11 @@ impl HostHeap {
         let view = view_at(key as u32, (key >> 32) as u32)?;
         let mut text: String = format!("{view:?}").chars().take(120).collect();
         if let Some((address, len)) = buffer_range(&view) {
-            let host = {
-                #[cfg(all(windows, feature = "native-memory"))]
-                if crate::memory_backend::is_native_backend_active() {
-                    crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
-                } else {
-                    crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address))
-                }
-                #[cfg(not(all(windows, feature = "native-memory")))]
-                crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address))
-            };
+            let host = if crate::memory_backend::is_native_backend_active() {
+        crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
+    } else {
+        crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
+    };
             text.push_str(&format!(" title {address:#x}+{len:#x} host {host:#x?}"));
         }
         Some(text)
@@ -3540,7 +3535,7 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
         && address - base < width.max(1)
         && let Some(shadow) = {
             if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(base, width).map(ShadowHandle::Legacy)
+                crate::shadow::find_handle(base, width)
             } else {
                 crate::shadow::find(base, width).map(ShadowHandle::Legacy)
             }
@@ -3548,13 +3543,11 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
-    let shadow = {
-        if crate::memory_backend::is_native_backend_active() {
-            crate::shadow::find_handle(address, len).map(ShadowHandle::Legacy)
-        } else {
-            crate::shadow::find(address, len).map(ShadowHandle::Legacy)
-        }
-    }?;
+    let shadow = if crate::memory_backend::is_native_backend_active() {
+        crate::shadow::find_handle(address, len)
+    } else {
+        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
+    };
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
@@ -3737,7 +3730,7 @@ fn buffer_srv(
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
             } else {
-                crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap()
+                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
             }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
@@ -3855,7 +3848,7 @@ fn buffer_uav(
             if crate::memory_backend::is_native_backend_active() {
                 crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
             } else {
-                crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap()
+                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap())
             }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
@@ -4130,16 +4123,11 @@ fn make_twinned(
     let device = &host.device;
     match view {
         &View::Constant(address, size) => {
-            let shadow: ShadowHandle = {
-                #[cfg(all(windows, feature = "native-memory"))]
-                if crate::memory_backend::is_native_backend_active() {
-                    crate::shadow::find_handle(address, u64::from(size)).map(ShadowHandle::Legacy)
-                } else {
-                    crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy)
-                }
-                #[cfg(not(all(windows, feature = "native-memory")))]
-                crate::shadow::find(address, u64::from(size)).map(ShadowHandle)
-            }?;
+            let shadow: ShadowHandle = if crate::memory_backend::is_native_backend_active() {
+            crate::shadow::find_handle(address, u64::from(size)).unwrap_or_else(|| crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy).unwrap())
+        } else {
+            crate::shadow::find_handle(address, u64::from(size)).unwrap_or_else(|| crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy).unwrap())
+        };
             let gpu = shadow.gpu(address);
             if gpu % 256 != 0 {
                 once!(
