@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 use windows::core::Interface;
 
 use crate::host::host;
@@ -211,9 +212,9 @@ impl QueueManager {
             return Ok(());
         }
 
-        let event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None)? };
+        let event = unsafe { CreateEventW(None, false, false, None)? };
         unsafe { queue.fence.SetEventOnCompletion(fence_value, event)? };
-        unsafe { windows::Win32::Foundation::WaitForSingleObject(event, windows::Win32::Foundation::INFINITE) };
+        unsafe { WaitForSingleObject(event, INFINITE) };
 
         self.stats.fence_waits += 1;
         Ok(())
@@ -235,9 +236,9 @@ impl QueueManager {
         
         // Wait on the wait queue.
         if unsafe { wait_q.fence.GetCompletedValue() } < fence_value {
-            let event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None)? };
+            let event = unsafe { CreateEventW(None, false, false, None)? };
             unsafe { wait_q.fence.SetEventOnCompletion(fence_value, event)? };
-            unsafe { windows::Win32::Foundation::WaitForSingleObject(event, windows::Win32::Foundation::INFINITE) };
+            unsafe { WaitForSingleObject(event, INFINITE) };
         }
 
         self.stats.cross_queue_syncs += 1;
@@ -296,9 +297,9 @@ impl AsyncQueue {
         if unsafe { self.fence.GetCompletedValue() } >= value {
             return Ok(());
         }
-        let event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None)? };
+        let event = unsafe { CreateEventW(None, false, false, None)? };
         unsafe { self.fence.SetEventOnCompletion(value, event)? };
-        unsafe { windows::Win32::Foundation::WaitForSingleObject(event, windows::Win32::Foundation::INFINITE) };
+        unsafe { WaitForSingleObject(event, INFINITE) };
         Ok(())
     }
 }

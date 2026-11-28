@@ -472,7 +472,7 @@ pub(crate) fn take_dropped() -> u64 {
     DROPPED.swap(0, Ordering::Relaxed)
 }
 /// A root SRV's dynamic slot in a list, and the host copy it shows.
-type RootSlot = (u32, Option<std::sync::Arc<crate::shadow::Shadow>>);
+type RootSlot = (u32, Option<crate::shadow::ShadowHandle>);
 
 /// Buffer views of the heap whose slot showed another host buffer than
 /// the copy the pass brought up to date for them, since the start
@@ -797,13 +797,13 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
     // A root constant-buffer view has a known 64 KiB access size. Unknown-size
     // root SRVs keep the unsized path and its conservative 4 MiB window.
     #[cfg(all(windows, feature = "native-memory"))]
-    let shadow = if crate::memory_backend::is_native_backend_active() {
+    let shadow: ShadowHandle = if crate::memory_backend::is_native_backend_active() {
         crate::shadow::find_known_handle(address, if srv { 1 } else { 1 << 16 })?
     } else {
         crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into()
     };
     #[cfg(not(all(windows, feature = "native-memory")))]
-    let shadow = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into();
+    let shadow: ShadowHandle = crate::shadow::find_known(address, if srv { 1 } else { 1 << 16 })?.into();
     let len = shadow
         .left(address)
         .min(if srv { limit } else { 1 << 16 });
@@ -1871,7 +1871,7 @@ impl State {
         let (index, shadow) = match self.root_uav_slots.get(&key) {
             Some((index, shadow)) => (*index, address.zip(shadow.clone())),
             None => {
-                let shadow = address.and_then(|a| find(a).map(|s| (a, s)));
+                let shadow = address.and_then(|a| crate::shadow::find_handle(a, 0).map(|s| (a, s)));
                 let Some(index) = host.dynamic(1) else {
                     return false;
                 };

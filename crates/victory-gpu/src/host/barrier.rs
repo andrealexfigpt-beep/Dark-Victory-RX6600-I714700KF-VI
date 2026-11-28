@@ -259,7 +259,7 @@ fn d3d12_state(state: ResourceState) -> D3D12_RESOURCE_STATES {
         ResourceState::DepthRead => D3D12_RESOURCE_STATE_DEPTH_READ,
         ResourceState::NonPixelShaderResource => D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         ResourceState::PixelShaderResource => D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-        ResourceState::StreamOutput => D3D12_RESOURCE_STATE_STREAM_OUTPUT,
+        ResourceState::StreamOutput => D3D12_RESOURCE_STATE_STREAM_OUT,
         ResourceState::IndirectArgument => D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
         ResourceState::CopyDest => D3D12_RESOURCE_STATE_COPY_DEST,
         ResourceState::CopySource => D3D12_RESOURCE_STATE_COPY_SOURCE,

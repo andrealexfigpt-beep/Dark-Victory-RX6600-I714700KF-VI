@@ -9,11 +9,13 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::*;
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 use windows::core::Interface;
 
 use crate::host::host;
 
 /// A pooled command allocator with its associated fence value.
+#[derive(Clone)]
 struct PooledAllocator {
     allocator: ID3D12CommandAllocator,
     /// The fence value at which this allocator was last submitted.
@@ -50,14 +52,14 @@ struct CommandTypePool {
     list_type: D3D12_COMMAND_LIST_TYPE,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 struct PoolStats {
-    pub direct_allocators_created: u64,
-    pub direct_allocators_reused: u64,
-    pub copy_allocators_created: u64,
-    pub copy_allocators_reused: u64,
-    pub compute_allocators_created: u64,
-    pub compute_allocators_reused: u64,
+    pub direct_allocators_created: std::sync::atomic::AtomicU64,
+    pub direct_allocators_reused: std::sync::atomic::AtomicU64,
+    pub copy_allocators_created: std::sync::atomic::AtomicU64,
+    pub copy_allocators_reused: std::sync::atomic::AtomicU64,
+    pub compute_allocators_created: std::sync::atomic::AtomicU64,
+    pub compute_allocators_reused: std::sync::atomic::AtomicU64,
 }
 
 impl CommandPool {
@@ -189,9 +191,9 @@ impl CommandPool {
         if completed >= value {
             return Ok(());
         }
-        let event = unsafe { windows::Win32::Foundation::CreateEventW(None, false, false, None) }?;
+        let event = unsafe { CreateEventW(None, false, false, None) }?;
         unsafe { self.fence.SetEventOnCompletion(value, event)? };
-        unsafe { windows::Win32::Foundation::WaitForSingleObject(event, windows::Win32::Foundation::INFINITE) };
+        unsafe { WaitForSingleObject(event, INFINITE) };
         Ok(())
     }
 

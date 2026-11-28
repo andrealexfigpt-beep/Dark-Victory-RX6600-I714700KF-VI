@@ -32,6 +32,7 @@ pub enum ShadowHandle {
     Native(Arc<crate::native_mem::NativeShadow>),
 }
 
+#[cfg(not(feature = "native-memory"))]
 impl From<Arc<Shadow>> for ShadowHandle {
     fn from(s: Arc<Shadow>) -> Self {
         ShadowHandle::Legacy(s)
@@ -181,7 +182,7 @@ impl ShadowHandle {
 #[cfg(all(windows, not(feature = "native-memory")))]
 impl From<Arc<Shadow>> for ShadowHandle {
     fn from(s: Arc<Shadow>) -> Self {
-        ShadowHandle(s)
+        ShadowHandle::Legacy(s)
     }
 }
 
@@ -5553,7 +5554,7 @@ pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
 
 #[cfg(all(windows, not(feature = "native-memory")))]
 pub(crate) fn find_handle(address: u64, len: u64) -> Option<ShadowHandle> {
-    find(address, len).map(ShadowHandle)
+    find(address, len).map(ShadowHandle::Legacy)
 }
 
 /// As [`find`], for an ask that is done with the copy when its list has

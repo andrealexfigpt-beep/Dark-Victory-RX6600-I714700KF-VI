@@ -3734,15 +3734,17 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = {
+    let mut shadow: Option<ShadowHandle> = {
         #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            crate::shadow::find_handle(address, len)
-        } else {
-            crate::shadow::find(address, len).map(Into::into)
+        {
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(address, len)
+            } else {
+                crate::shadow::find(address, len).map(ShadowHandle::Legacy)
+            }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(Into::into)
+        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
     }?;
     let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
@@ -3850,15 +3852,17 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = {
+    let mut shadow: Option<ShadowHandle> = {
         #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            crate::shadow::find_handle(address, len)
-        } else {
-            crate::shadow::find(address, len).map(Into::into)
+        {
+            if crate::memory_backend::is_native_backend_active() {
+                crate::shadow::find_handle(address, len)
+            } else {
+                crate::shadow::find(address, len).map(ShadowHandle::Legacy)
+            }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(Into::into)
+        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
     }?;
     let unit = {
         // SAFETY: a buffer view's union member.

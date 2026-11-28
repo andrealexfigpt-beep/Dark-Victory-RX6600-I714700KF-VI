@@ -79,9 +79,9 @@ impl DescriptorHeapPool {
 
         // Validate heap type flags.
         let flags = match heap_type {
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV => D3D12_DESCRIPTOR_HEAP_FLAGS_SHADER_VISIBLE,
-            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER => D3D12_DESCRIPTOR_HEAP_FLAGS_SHADER_VISIBLE,
-            _ => D3D12_DESCRIPTOR_HEAP_FLAGS_NONE,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV => D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER => D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            _ => D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
         };
 
         Ok(DescriptorHeapPool {
@@ -115,9 +115,9 @@ impl DescriptorHeapPool {
         // Need a new heap.
         let device = host().expect("Host not initialized").device.clone();
         let flags = match self.heap_type {
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV => D3D12_DESCRIPTOR_HEAP_FLAGS_SHADER_VISIBLE,
-            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER => D3D12_DESCRIPTOR_HEAP_FLAGS_SHADER_VISIBLE,
-            _ => D3D12_DESCRIPTOR_HEAP_FLAGS_NONE,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV => D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER => D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            _ => D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
         };
 
         let heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
@@ -130,7 +130,7 @@ impl DescriptorHeapPool {
         let heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&heap_desc)? };
 
         let cpu_base = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
-        let gpu_base = if flags & D3D12_DESCRIPTOR_HEAP_FLAGS_SHADER_VISIBLE.0 != 0 {
+        let gpu_base = if flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE.0 != 0 {
             unsafe { heap.GetGPUDescriptorHandleForHeapStart() }
         } else {
             D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 }
@@ -141,7 +141,7 @@ impl DescriptorHeapPool {
             descriptor_size: self.descriptor_size,
             capacity: self.max_per_heap,
             free_blocks: vec![(0, self.max_per_heap)],
-            shader_visible: flags & D3D12_DESCRIPTOR_HEAP_FLAGS_SHADER_VISIBLE.0 != 0,
+            shader_visible: flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE.0 != 0,
             cpu_base,
             gpu_base,
         };
