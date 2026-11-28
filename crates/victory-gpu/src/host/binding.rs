@@ -284,10 +284,10 @@ pub(crate) fn write_descriptor(
         return;
     }
     let dest = D3D12_CPU_DESCRIPTOR_HANDLE {
-        ptr: block.cpu_handle.ptr + (index as usize * crate::host::descriptor_pool::cbv_srv_uav_pool().descriptor_size as usize),
+        ptr: block.cpu_handle.ptr + (index as usize * crate::host::descriptor_pool::cbv_srv_uav_pool().descriptor_size() as usize),
     };
     // SAFETY: descriptor heaps are just memory.
-    unsafe { std::ptr::copy_nonoverlapping(view.ptr as *const u8, dest.ptr as *mut u8, crate::host::descriptor_pool::cbv_srv_uav_pool().descriptor_size as usize) };
+    unsafe { std::ptr::copy_nonoverlapping(view.ptr as *const u8, dest.ptr as *mut u8, crate::host::descriptor_pool::cbv_srv_uav_pool().descriptor_size() as usize) };
 }
 
 #[cfg(test)]

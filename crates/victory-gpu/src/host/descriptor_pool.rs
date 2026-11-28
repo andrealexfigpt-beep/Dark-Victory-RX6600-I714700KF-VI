@@ -68,6 +68,11 @@ pub(crate) struct HeapPoolStats {
 }
 
 impl DescriptorHeapPool {
+    /// Get the descriptor size for this pool.
+    pub(crate) fn descriptor_size(&self) -> u32 {
+        self.descriptor_size
+    }
+
     /// Create a new descriptor heap pool.
     pub(crate) fn new(
         device: &ID3D12Device,

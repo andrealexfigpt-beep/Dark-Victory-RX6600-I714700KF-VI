@@ -4134,7 +4134,7 @@ fn make_twinned(
     let device = &host.device;
     match view {
         &View::Constant(address, size) => {
-            let shadow = {
+            let shadow: ShadowHandle = {
                 #[cfg(all(windows, feature = "native-memory"))]
                 if crate::memory_backend::is_native_backend_active() {
                     crate::shadow::find_handle(address, u64::from(size))
@@ -5322,7 +5322,7 @@ mod tests {
             let (copy, ..) = buffer_copy(&v).unwrap();
             assert_ne!(copy.span().0, start + off, "its buffer's copy");
             // SAFETY: a live buffer.
-            assert_eq!(width(&v), unsafe { copy.resource().GetDesc() }.Width);
+            assert_eq!(width(&v), unsafe { copy.buffer.GetDesc() }.Width);
         }
     }
 

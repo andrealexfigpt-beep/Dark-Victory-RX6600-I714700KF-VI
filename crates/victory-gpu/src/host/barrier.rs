@@ -157,7 +157,7 @@ impl BarrierTracker {
             });
 
             // Check if transition is needed.
-            let current_state = entry.get_state(subresource);
+            let current_state = entry.get_state(*subresource);
             if current_state != *target_state {
                 // Emit barrier.
                 let barrier = D3D12_RESOURCE_BARRIER {
@@ -165,8 +165,8 @@ impl BarrierTracker {
                     Flags: D3D12_RESOURCE_BARRIER_FLAGS(0),
                     Anonymous: D3D12_RESOURCE_BARRIER_0 {
                         Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                            pResource: Some(resource.clone()),
-                            Subresource: subresource,
+                            pResource: std::mem::ManuallyDrop::new(Some(resource.clone())),
+                            Subresource: *subresource,
                             StateBefore: d3d12_state(current_state),
                             StateAfter: d3d12_state(*target_state),
                         })
@@ -175,7 +175,7 @@ impl BarrierTracker {
                 barriers.push(barrier);
                 
                 // Update tracked state.
-                entry.set_state(subresource, *target_state);
+                entry.set_state(*subresource, *target_state);
                 entry.last_submission = self.current_submission.load(Ordering::Acquire);
                 entry.known = true;
                 
@@ -197,7 +197,7 @@ impl BarrierTracker {
             Flags: D3D12_RESOURCE_BARRIER_FLAGS(0),
             Anonymous: D3D12_RESOURCE_BARRIER_0 {
                 UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
-                    pResource: Some(resource.clone()),
+                    pResource: std::mem::ManuallyDrop::new(Some(resource.clone())),
                 })
             }
         }
@@ -214,8 +214,8 @@ impl BarrierTracker {
             Flags: D3D12_RESOURCE_BARRIER_FLAGS(0),
             Anonymous: D3D12_RESOURCE_BARRIER_0 {
                 Aliasing: std::mem::ManuallyDrop::new(D3D12_RESOURCE_ALIASING_BARRIER {
-                    pResourceBefore: before.cloned(),
-                    pResourceAfter: after.cloned(),
+                    pResourceBefore: std::mem::ManuallyDrop::new(before.cloned()),
+                    pResourceAfter: std::mem::ManuallyDrop::new(after.cloned()),
                 })
             }
         }
