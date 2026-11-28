@@ -512,7 +512,11 @@ fn heap_spread() -> bool {
 #[cfg(all(windows, feature = "native-memory"))]
 type HeapView = (crate::shadow::ShadowHandle, u64, u64);
 #[cfg(all(windows, feature = "native-memory"))]
-type HeapSpan = (crate::shadow::ShadowHandle, u64, u64);
+struct HeapSpan {
+    copy: crate::shadow::ShadowHandle,
+    starts: std::collections::BTreeSet<(u64, u32)>,
+    ends: std::collections::BTreeSet<(u64, u32)>,
+}
 
 #[cfg(not(all(windows, feature = "native-memory")))]
 type HeapView = (std::sync::Arc<crate::shadow::Shadow>, u64, u64);
@@ -553,19 +557,22 @@ impl HeapRanges {
         if index >= self.slots.len() {
             self.slots.resize_with(index + 1, || None);
         }
-        let key = |copy: &crate::shadow::ShadowHandle| std::sync::Arc::as_ptr(&match copy {
-            crate::shadow::ShadowHandle::Legacy(arc) => arc.clone(),
-            crate::shadow::ShadowHandle::Native(arc) => arc.clone(),
-        }) as usize;
+        let key = |copy: &crate::shadow::ShadowHandle| -> usize {
+            match copy {
+                crate::shadow::ShadowHandle::Legacy(arc) => std::sync::Arc::as_ptr(arc) as usize,
+                crate::shadow::ShadowHandle::Native(arc) => std::sync::Arc::as_ptr(arc) as usize,
+            }
+        };
+        let ptr_eq = |a: &crate::shadow::ShadowHandle, b: &crate::shadow::ShadowHandle| -> bool {
+            match (a, b) {
+                (crate::shadow::ShadowHandle::Legacy(a), crate::shadow::ShadowHandle::Legacy(b)) => std::sync::Arc::ptr_eq(a, b),
+                (crate::shadow::ShadowHandle::Native(a), crate::shadow::ShadowHandle::Native(b)) => std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            }
+        };
         let old = &mut self.slots[index];
         if let (Some((a, from, to)), Some((b, start, end))) = (&*old, &range)
-            && std::sync::Arc::ptr_eq(&match a {
-                crate::shadow::ShadowHandle::Legacy(arc) => arc.clone(),
-                crate::shadow::ShadowHandle::Native(arc) => arc.clone(),
-            }, &match b {
-                crate::shadow::ShadowHandle::Legacy(arc) => arc.clone(),
-                crate::shadow::ShadowHandle::Native(arc) => arc.clone(),
-            }) && from == start && to == end
+            && ptr_eq(a, b) && from == start && to == end
         {
             return;
         }
@@ -1096,6 +1103,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         });
         ranges.set(index, range);
     }
+    #[cfg(not(all(windows, feature = "native-memory")))]
     if crate::picked::on() {
         crate::picked::shown(unordered, all);
     }

@@ -3547,7 +3547,7 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
         crate::shadow::find_handle(address, len)
     } else {
         crate::shadow::find(address, len).map(ShadowHandle::Legacy)
-    };
+    }?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
