@@ -13,7 +13,7 @@
 //! - CPU/GPU coherence via explicit Map/Unmap + fence ordering (standard D3D12)
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::ptr;
 
@@ -55,20 +55,47 @@ pub const UPLOAD_ALIGNMENT: u64 = 64 * 1024;
 const DEFAULT_ALIGNMENT: u64 = 64 * 1024;
 
 /// A host allocation backing title virtual memory.
-#[derive(Debug)]
 pub struct HostAllocation {
     /// Base address in title virtual address space.
-    title_va: u64,
+    pub title_va: u64,
     /// Size in bytes.
     pub size: u64,
     /// Protection flags (PAGE_READWRITE, etc.).
     protect: u32,
     /// Whether this is a placeholder (reserved but not committed).
-    pub placeholder: bool,
+    placeholder: AtomicBool,
     /// Underlying Windows allocation (for VirtualFree on drop).
-    base_ptr: *mut std::ffi::c_void,
+    pub base_ptr: *mut std::ffi::c_void,
     /// Actual committed size.
-    pub committed_size: u64,
+    committed_size: AtomicU64,
+}
+
+impl std::fmt::Debug for HostAllocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostAllocation")
+            .field("title_va", &self.title_va)
+            .field("size", &self.size)
+            .field("protect", &self.protect)
+            .field("placeholder", &self.is_placeholder())
+            .field("base_ptr", &self.base_ptr)
+            .field("committed_size", &self.committed_size())
+            .finish()
+    }
+}
+
+impl HostAllocation {
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder.load(Ordering::Acquire)
+    }
+
+    pub fn committed_size(&self) -> u64 {
+        self.committed_size.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_committed(&self, size: u64) {
+        self.placeholder.store(false, Ordering::Release);
+        self.committed_size.store(size, Ordering::Release);
+    }
 }
 
 impl Drop for HostAllocation {
@@ -95,7 +122,6 @@ impl Drop for NativeMemory {
 }
 
 /// A GPU resource bound to a title virtual address range.
-#[derive(Debug)]
 pub struct GpuResourceBinding {
     /// Title virtual address this resource is bound to.
     title_va: u64,
@@ -138,6 +164,27 @@ pub struct GpuResourceBinding {
     heap_offset: u64,
     /// Heap reference for placed resources.
     heap: Option<ID3D12Heap>,
+}
+
+impl std::fmt::Debug for GpuResourceBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuResourceBinding")
+            .field("title_va", &self.title_va)
+            .field("size", &self.size)
+            .field("gpu_va", &self.gpu_va)
+            .field("uav", &self.uav)
+            .field("dimension", &self.dimension)
+            .field("format", &self.format)
+            .field("mip_levels", &self.mip_levels)
+            .field("array_size", &self.array_size)
+            .field("sample_count", &self.sample_count)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("depth_or_array_size", &self.depth_or_array_size)
+            .field("heap_offset", &self.heap_offset)
+            .field("heap", &self.heap.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl GpuResourceBinding {
@@ -321,7 +368,6 @@ impl GpuResourceBinding {
 }
 
 /// GPU heap arena for sub-allocating resources.
-#[derive(Debug)]
 struct GpuArena {
     /// The D3D12 heap.
     heap: ID3D12Heap,
@@ -337,6 +383,17 @@ struct GpuArena {
     free_list: Mutex<Vec<(u64, u64)>>,
     /// Allocated resources in this arena (for tracking).
     allocations: Mutex<HashMap<u64, (u64, u64)>>, // gpu_va -> (offset, size)
+}
+
+impl std::fmt::Debug for GpuArena {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuArena")
+            .field("heap_type", &self.heap_type)
+            .field("heap_flags", &self.heap_flags)
+            .field("base_gpu_va", &self.base_gpu_va)
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GpuArena {
@@ -432,7 +489,6 @@ impl GpuArena {
 
 /// Persistent ring buffer for uploads (CPU -> GPU).
 /// Uses fence-safe wraparound to prevent reuse of in-flight memory.
-#[derive(Debug)]
 pub struct UploadRing {
     /// The upload heap resource.
     resource: ID3D12Resource,
@@ -451,6 +507,16 @@ pub struct UploadRing {
     /// Pending allocations: (offset, size, fence_value).
     /// Protected by a mutex for thread-safe access.
     pending: Mutex<Vec<(u64, u64, u64)>>,
+}
+
+impl std::fmt::Debug for UploadRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadRing")
+            .field("size", &self.size)
+            .field("write_offset", &self.write_offset.load(Ordering::Relaxed))
+            .field("fence_value", &self.fence_value.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 // SAFETY: UploadRing contains a raw pointer (mapped_ptr) but all access is protected
@@ -615,7 +681,6 @@ impl Drop for UploadRing {
 
 /// Persistent ring buffer for readbacks (GPU -> CPU).
 /// Uses fence-safe wraparound to prevent reuse of in-flight memory.
-#[derive(Debug)]
 pub struct ReadbackRing {
     resource: ID3D12Resource,
     mapped_ptr: *mut u8,
@@ -626,6 +691,16 @@ pub struct ReadbackRing {
     fence_event: HANDLE,
     /// Pending allocations: (offset, size, fence_value).
     pending: Mutex<Vec<(u64, u64, u64)>>,
+}
+
+impl std::fmt::Debug for ReadbackRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadbackRing")
+            .field("size", &self.size)
+            .field("read_offset", &self.read_offset.load(Ordering::Relaxed))
+            .field("fence_value", &self.fence_value.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 // SAFETY: ReadbackRing contains a raw pointer (mapped_ptr) but all access is protected
@@ -828,7 +903,6 @@ struct DeferredResource {
     heap_offset: u64,
 }
 
-#[derive(Default, Debug)]
 struct NativeMemoryStats {
     host_allocations: AtomicUsize,
     gpu_resources: AtomicUsize,
@@ -837,6 +911,34 @@ struct NativeMemoryStats {
     copy_operations: AtomicU64,
     fence_waits: AtomicU64,
     allocation_failures: AtomicUsize,
+}
+
+impl Default for NativeMemoryStats {
+    fn default() -> Self {
+        Self {
+            host_allocations: AtomicUsize::new(0),
+            gpu_resources: AtomicUsize::new(0),
+            upload_bytes: AtomicU64::new(0),
+            readback_bytes: AtomicU64::new(0),
+            copy_operations: AtomicU64::new(0),
+            fence_waits: AtomicU64::new(0),
+            allocation_failures: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeMemoryStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeMemoryStats")
+            .field("host_allocations", &self.host_allocations.load(Ordering::Relaxed))
+            .field("gpu_resources", &self.gpu_resources.load(Ordering::Relaxed))
+            .field("upload_bytes", &self.upload_bytes.load(Ordering::Relaxed))
+            .field("readback_bytes", &self.readback_bytes.load(Ordering::Relaxed))
+            .field("copy_operations", &self.copy_operations.load(Ordering::Relaxed))
+            .field("fence_waits", &self.fence_waits.load(Ordering::Relaxed))
+            .field("allocation_failures", &self.allocation_failures.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 impl NativeMemory {
@@ -936,9 +1038,9 @@ impl NativeMemory {
                 title_va: allocated_va,
                 size,
                 protect,
-                placeholder: true,
+                placeholder: AtomicBool::new(true),
                 base_ptr: ptr,
-                committed_size: 0,
+                committed_size: AtomicU64::new(0),
             });
             self.allocations.insert(allocated_va, alloc);
             self.stats.host_allocations.fetch_add(1, Ordering::Relaxed);
@@ -964,9 +1066,9 @@ impl NativeMemory {
                 title_va: allocated_va,
                 size,
                 protect,
-                placeholder: false,
+                placeholder: AtomicBool::new(false),
                 base_ptr: ptr,
-                committed_size: size,
+                committed_size: AtomicU64::new(size),
             });
             self.allocations.insert(allocated_va, alloc);
             self.stats.host_allocations.fetch_add(1, Ordering::Relaxed);
@@ -1478,6 +1580,113 @@ impl NativeMemory {
         self.allocations.get(&title_va).map(|a| a.clone())
     }
 
+    /// Find a committed allocation covering the given address range.
+    fn find_committed_allocation(&self, address: usize, len: usize) -> Option<Arc<HostAllocation>> {
+        self.allocations.iter().find(|a| {
+            let a = a.value();
+            (address as u64).checked_sub(a.title_va).is_some_and(|off| {
+                off.checked_add(len as u64).is_some_and(|end| end <= a.committed_size())
+            })
+        }).map(|a| a.value().clone())
+    }
+
+    /// Ensure a committed allocation exists for the given address range.
+    /// Commits an existing placeholder allocation or creates a new one.
+    fn ensure_committed_allocation(&self, address: usize, len: usize) -> anyhow::Result<Arc<HostAllocation>> {
+        let address_u64 = address as u64;
+        let len_u64 = len as u64;
+
+        // Align to page boundaries
+        let aligned_va = address_u64 & !(PAGE - 1);
+        let end_va = address_u64.checked_add(len_u64).ok_or_else(|| anyhow::anyhow!("address range overflow"))?;
+        let aligned_end = end_va.next_multiple_of(PAGE);
+        let size = aligned_end.checked_sub(aligned_va).ok_or_else(|| anyhow::anyhow!("size overflow"))?;
+
+        // First, check if there's a placeholder allocation covering this range
+        if let Some(placeholder) = self.allocations.iter().find(|a| {
+            let a = a.value();
+            a.is_placeholder()
+                && aligned_va >= a.title_va
+                && aligned_end <= a.title_va + a.size
+        }) {
+            let placeholder = placeholder.value().clone();
+            // Commit the placeholder allocation
+            return self.commit_placeholder(placeholder, aligned_va, size);
+        }
+
+        // No existing allocation (placeholder or committed) covers this range.
+        // Create a new committed allocation.
+        self.allocate_committed(aligned_va, size, PAGE_READWRITE)
+    }
+
+    /// Commit a placeholder allocation for the given range.
+    fn commit_placeholder(
+        &self,
+        placeholder: Arc<HostAllocation>,
+        aligned_va: u64,
+        size: u64,
+    ) -> anyhow::Result<Arc<HostAllocation>> {
+        // The placeholder covers a larger range. We need to commit the requested sub-range.
+        // For simplicity, commit the entire placeholder range.
+        let ptr = unsafe {
+            windows_sys::Win32::System::Memory::VirtualAlloc(
+                placeholder.base_ptr,
+                placeholder.size as usize,
+                SYS_MEM_COMMIT,
+                placeholder.protect,
+            )
+        };
+        if ptr.is_null() {
+            return Err(anyhow::anyhow!("VirtualAlloc commit failed for placeholder"));
+        }
+
+        // Update the existing allocation in place (atomic fields)
+        placeholder.set_committed(placeholder.size);
+        debug!("Committed placeholder title VA {:#x} + {:#x}", placeholder.title_va, placeholder.size);
+        Ok(placeholder)
+    }
+
+    /// Allocate a new committed host allocation.
+    fn allocate_committed(&self, aligned_va: u64, size: u64, protect: u32) -> anyhow::Result<Arc<HostAllocation>> {
+        // Try to allocate
+        let ptr = unsafe {
+            windows_sys::Win32::System::Memory::VirtualAlloc(
+                aligned_va as *mut std::ffi::c_void,
+                size as usize,
+                SYS_MEM_RESERVE | SYS_MEM_COMMIT,
+                protect,
+            )
+        };
+        if ptr.is_null() {
+            // Allocation failed. Check if another thread already allocated this range.
+            let error = std::io::Error::last_os_error();
+            // If the address is already allocated, try to get the existing allocation.
+            if error.raw_os_error() == Some(487) || error.raw_os_error() == Some(183) {
+                // ERROR_INVALID_ADDRESS (487) or ERROR_ALREADY_EXISTS (183)
+                if let Some(existing) = self.allocations.get(&aligned_va) {
+                    if !existing.is_placeholder() && existing.committed_size() >= size {
+                        return Ok(existing.clone());
+                    }
+                }
+            }
+            self.stats.allocation_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(anyhow::anyhow!("VirtualAlloc commit failed: {}", error));
+        }
+
+        let alloc = Arc::new(HostAllocation {
+            title_va: aligned_va,
+            size,
+            protect,
+            placeholder: AtomicBool::new(false),
+            base_ptr: ptr,
+            committed_size: AtomicU64::new(size),
+        });
+        self.allocations.insert(aligned_va, alloc.clone());
+        self.stats.host_allocations.fetch_add(1, Ordering::Relaxed);
+        debug!("Allocated committed title VA {:#x} + {:#x}", aligned_va, size);
+        Ok(alloc)
+    }
+
     /// Advance frame counter and report stats.
     /// Also processes deferred resource destruction for completed fences.
     pub fn next_frame(&self) {
@@ -1907,10 +2116,17 @@ impl NativeShadow {
     }
 
     fn host_range(&self, address: usize, len: usize) -> (Arc<HostAllocation>, usize, usize) {
-        let allocation = self.backend.allocations.iter().find(|a|
-            (address as u64).checked_sub(a.title_va).is_some_and(|off|
-                off.checked_add(len as u64).is_some_and(|end| end <= a.committed_size))
-        ).expect("native shadow range requires committed title memory").value().clone();
+        // First try to find an existing committed allocation covering the range.
+        if let Some(allocation) = self.backend.find_committed_allocation(address, len) {
+            let offset = address - allocation.title_va as usize;
+            let resource_offset = address.checked_sub(self.title_va as usize).expect("address precedes binding");
+            assert!(resource_offset.checked_add(len).is_some_and(|end| end <= self.len as usize));
+            return (allocation, offset, resource_offset);
+        }
+
+        // No committed allocation found. Ensure one exists (commits placeholders or creates new).
+        let allocation = self.backend.ensure_committed_allocation(address, len)
+            .expect("failed to ensure committed host allocation for native shadow range");
         let offset = address - allocation.title_va as usize;
         let resource_offset = address.checked_sub(self.title_va as usize).expect("address precedes binding");
         assert!(resource_offset.checked_add(len).is_some_and(|end| end <= self.len as usize));
