@@ -331,8 +331,7 @@ impl GpuArena {
         };
 
         let mut heap: Option<ID3D12Heap> = None;
-        unsafe { device.CreateHeap(&desc, &ID3D12Heap::IID, heap.as_mut().map(|h| h as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut())).ok()? };
-        let heap = heap.ok_or(windows::core::Error::from(winerror::E_FAIL))?;
+        unsafe { device.CreateHeap(&desc, &mut heap) }?;
 
         Ok(GpuArena {
             heap,
@@ -459,8 +458,7 @@ impl UploadRing {
         };
 
         let mut resource: Option<ID3D12Resource> = None;
-        unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None, &ID3D12Resource::IID, resource.as_mut().map(|r| r as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut())).ok()? };
-        let resource = resource.ok_or(windows::core::Error::from(winerror::E_FAIL))?;
+        unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None, &mut resource) }?;
 
         // Map the resource for CPU writes
         let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
@@ -633,8 +631,7 @@ impl ReadbackRing {
         };
 
         let mut resource: Option<ID3D12Resource> = None;
-        unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &ID3D12Resource::IID, resource.as_mut().map(|r| r as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut())).ok()? };
-        let resource = resource.ok_or(windows::core::Error::from(winerror::E_FAIL))?;
+        unsafe { device.CreateCommittedResource(&heap_props, D3D12_HEAP_FLAGS(0), &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut resource) }?;
 
         let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
         unsafe {
