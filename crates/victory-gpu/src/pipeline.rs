@@ -208,26 +208,29 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     let host = crate::shader_cache::host_shader(container)?;
     
     // Record shader permutation for ahead-of-time compilation tracking
-    let translation_fingerprint = victory_shader::emit::translation_fingerprint();
-    let root_signature_hash = compute_root_signature_hash(&host);
-    let wave_mismatch = host.stage == HwStage::Cs && host.user_data_dwords() > 0; // Simplified
-    let cross_lane = false; // Would need to analyze the shader IR
-    
-    // Find the stage of the translated program
-    let stage = programs.iter()
-        .find(|p| matches!(p.stage, HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs))
-        .map(|p| p.stage)
-        .unwrap_or(HwStage::Cs);
-    
-    crate::shader_perm::record_translation(
-        stage,
-        container,
-        translation_fingerprint,
-        root_signature_hash,
-        wave_mismatch,
-        cross_lane,
-        &host,
-    );
+    #[cfg(feature = "native-memory")]
+    {
+        let translation_fingerprint = victory_shader::emit::translation_fingerprint();
+        let root_signature_hash = compute_root_signature_hash(&host);
+        let wave_mismatch = host.stage == HwStage::Cs && host.user_data_dwords() > 0; // Simplified
+        let cross_lane = false; // Would need to analyze the shader IR
+        
+        // Find the stage of the translated program
+        let stage = programs.iter()
+            .find(|p| matches!(p.stage, HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs))
+            .map(|p| p.stage)
+            .unwrap_or(HwStage::Cs);
+        
+        crate::shader_perm::record_translation(
+            stage,
+            container,
+            translation_fingerprint,
+            root_signature_hash,
+            wave_mismatch,
+            cross_lane,
+            &host,
+        );
+    }
     
     let stores = programs.is_empty() || programs.iter().any(stores);
     let threads = programs.iter().find_map(|p| match &p.io {
@@ -271,7 +274,16 @@ pub(crate) fn compute_root_signature_hash(host: &victory_shader::emit::HostShade
     }
     h.update(&(host.samplers.len() as u32).to_le_bytes());
     for s in &host.samplers {
-        h.update(s);
+        h.update(&s.filter.to_le_bytes());
+        h.update(&s.address[0].to_le_bytes());
+        h.update(&s.address[1].to_le_bytes());
+        h.update(&s.address[2].to_le_bytes());
+        h.update(&s.mip_lod_bias.to_le_bytes());
+        h.update(&s.max_anisotropy.to_le_bytes());
+        h.update(&s.comparison.to_le_bytes());
+        h.update(&s.border.to_le_bytes());
+        h.update(&s.min_lod.to_le_bytes());
+        h.update(&s.max_lod.to_le_bytes());
     }
     h.update(&(host.static_samplers.len() as u32).to_le_bytes());
     for s in &host.static_samplers {

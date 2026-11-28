@@ -174,24 +174,6 @@ impl MemoryManager {
             pool_shared.insert(pool, 0);
         }
         
-        // If adapter available, query actual budgets.
-        if let Some(ref adapter) = adapter {
-            if let Ok(mut budget) = unsafe {
-                let mut budget: DXGI_QUERY_VIDEO_MEMORY_INFO = std::mem::zeroed();
-                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut budget)
-            } {
-                config.vram_budget = budget.Budget;
-                config.vram_reserve = (budget.Budget as f64 * 0.05) as u64; // 5% reserve
-            }
-            if let Ok(mut budget) = unsafe {
-                let mut budget: DXGI_QUERY_VIDEO_MEMORY_INFO = std::mem::zeroed();
-                adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut budget)
-            } {
-                config.shared_budget = budget.Budget;
-                config.shared_reserve = (budget.Budget as f64 * 0.05) as u64;
-            }
-        }
-        
         // Detect ReBAR support (PCIe Resizable BAR).
         // If adapter available, query actual budgets.
         if let Some(ref adapter) = adapter {

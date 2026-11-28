@@ -1346,14 +1346,14 @@ fn view_home(
     start: u64,
     len: u64,
     (stride, raw, format): (u32, bool, u32),
-) -> crate::shadow::ShadowHandle {
+) -> std::sync::Arc<crate::shadow::Shadow> {
     let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset(start)) else {
-        return shadow.into();
+        return shadow;
     };
     if !view_bytes() {
-        return shadow.into();
+        return shadow;
     }
-    crate::shadow::exact(start, len).map(Into::into).unwrap_or_else(|| shadow.into())
+    crate::shadow::exact(start, len).unwrap_or(shadow)
 }
 
 /// For device-removed reports: what the slots of the title's view heap that
@@ -3731,7 +3731,7 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = {
+    let mut shadow: crate::shadow::ShadowHandle = {
         #[cfg(all(windows, feature = "native-memory"))]
         {
             if crate::memory_backend::is_native_backend_active() {
@@ -3852,7 +3852,7 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow = {
+    let mut shadow: crate::shadow::ShadowHandle = {
         #[cfg(all(windows, feature = "native-memory"))]
         {
             if crate::memory_backend::is_native_backend_active() {
