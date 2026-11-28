@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, native-memory-v1, native-final-v1]
+    branches: [main, native-memory-v1, native-final-v1, windows-fix-v2]
 
 permissions:
   contents: read
