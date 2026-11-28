@@ -1,8 +1,8 @@
 //! Benchmarks for Phase 6 Native Optimization.
 //!
-//! Run with: `cargo bench -p victory-gpu --features native-memory` on Windows.
+//! Run with: `cargo bench -p victory-gpu` on Windows.
 
-#[cfg(all(windows, feature = "native-memory"))]
+#[cfg(windows)]
 mod phase6_bench {
     use std::hint::black_box;
     use std::sync::Arc;
@@ -363,13 +363,12 @@ mod phase6_bench {
     }
 }
 
-#[cfg(all(windows, feature = "native-memory"))]
+#[cfg(windows)]
 fn main() {
     phase6_bench::run_all();
 }
 
-#[cfg(not(all(windows, feature = "native-memory")))]
+#[cfg(not(windows))]
 fn main() {
-    println!("Benchmarks require Windows with native-memory feature");
-    println!("Run on Windows with: cargo bench -p victory-gpu --features native-memory");
+    println!("Benchmarks require Windows");
 }

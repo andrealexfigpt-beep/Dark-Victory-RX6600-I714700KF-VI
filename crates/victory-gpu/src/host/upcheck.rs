@@ -29,15 +29,8 @@ use super::*;
 use crate::shadow::Shadow;
 
 pub(crate) fn on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        // Upcheck only works with legacy backend
-        #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            return false;
-        }
-        std::env::var_os("VICTORY_UPCOPY_CHECK").is_some_and(|v| v == "1")
-    })
+    // Upcheck only works with legacy backend; native backend is always active now
+    false
 }
 
 /// One dispatch looks at up to a piece: `words` words of the card's buffer

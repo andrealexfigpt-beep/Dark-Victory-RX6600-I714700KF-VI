@@ -1319,7 +1319,6 @@ fn view_bytes() -> bool {
 
 /// The copy the buffer view of `[start, start + len)` is made on: `shadow`, the one
 /// its buffer has, or one of the view's own bytes ([`off_elements`]).
-#[cfg(all(windows, feature = "native-memory"))]
 fn view_home(
     shadow: crate::shadow::ShadowHandle,
     start: u64,
@@ -1338,22 +1337,6 @@ fn view_home(
     }
     // For native backend, we can't create exact shadows; return the original
     shadow
-}
-
-#[cfg(not(all(windows, feature = "native-memory")))]
-fn view_home(
-    shadow: std::sync::Arc<crate::shadow::Shadow>,
-    start: u64,
-    len: u64,
-    (stride, raw, format): (u32, bool, u32),
-) -> std::sync::Arc<crate::shadow::Shadow> {
-    let Some(offset) = shadow.offset_in(start).map(|_| shadow.offset(start)) else {
-        return shadow;
-    };
-    if !view_bytes() {
-        return shadow;
-    }
-    crate::shadow::exact(start, len).unwrap_or(shadow)
 }
 
 /// For device-removed reports: what the slots of the title's view heap that
@@ -3298,16 +3281,7 @@ impl HostHeap {
         let view = view_at(key as u32, (key >> 32) as u32)?;
         let mut text: String = format!("{view:?}").chars().take(120).collect();
         if let Some((address, len)) = buffer_range(&view) {
-            let host = {
-                #[cfg(all(windows, feature = "native-memory"))]
-                if crate::memory_backend::is_native_backend_active() {
-                    crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address))
-                } else {
-                    crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address))
-                }
-                #[cfg(not(all(windows, feature = "native-memory")))]
-                crate::shadow::find(address, len.max(1)).map(|s| s.gpu(address))
-            };
+            let host = crate::shadow::find_handle(address, len.max(1)).map(|s| s.gpu(address));
             text.push_str(&format!(" title {address:#x}+{len:#x} host {host:#x?}"));
         }
         Some(text)
@@ -3527,7 +3501,6 @@ fn view_extent() -> bool {
 /// part's one), and for buffer objects, a part that also lies in a smaller
 /// buffer object. The slot then showed a copy nothing brought up to date,
 /// and what shaders wrote through it was looked for in the other copy.
-#[cfg(all(windows, feature = "native-memory"))]
 pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
@@ -3538,28 +3511,16 @@ pub(crate) fn buffer_copy(view: &View) -> Option<(crate::shadow::ShadowHandle, u
         // (The console is lax: a view may begin past its buffer's end.)
         && address >= base
         && address - base < width.max(1)
-        && let Some(shadow) = {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(base, width).map(ShadowHandle::Legacy)
-            } else {
-                crate::shadow::find(base, width).map(ShadowHandle::Legacy)
-            }
-        }
+        && let Some(shadow) = crate::shadow::find_handle(base, width)
     {
         return Some((view_home(shadow, address, len, view_elements(view)?), address, len));
     }
-    let shadow = {
-        if crate::memory_backend::is_native_backend_active() {
-            crate::shadow::find_handle(address, len).map(ShadowHandle::Legacy)
-        } else {
-            crate::shadow::find(address, len).map(ShadowHandle::Legacy)
-        }
-    }?;
+    let shadow = crate::shadow::find_handle(address, len)?;
     Some((view_home(shadow, address, len, view_elements(view)?), address, len))
 }
 
-#[cfg(not(all(windows, feature = "native-memory")))]
-pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
+// #[cfg(not(all(windows, feature = "native-memory")))]
+// pub(crate) fn buffer_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
     let (address, len) = buffer_range(view)?;
     if len == 0 {
         return None;
@@ -3731,18 +3692,7 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow: crate::shadow::ShadowHandle = {
-        #[cfg(all(windows, feature = "native-memory"))]
-        {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy)).unwrap()
-            } else {
-                crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap()
-            }
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(ShadowHandle).unwrap()
-    };
+    let mut shadow: crate::shadow::ShadowHandle = crate::shadow::find_handle(address, len).unwrap();
     let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
     // SAFETY: a buffer view's union member.
@@ -3849,18 +3799,7 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     twin: Option<D3D12_CPU_DESCRIPTOR_HANDLE>,
 ) -> Option<Kept> {
-    let mut shadow: crate::shadow::ShadowHandle = {
-        #[cfg(all(windows, feature = "native-memory"))]
-        {
-            if crate::memory_backend::is_native_backend_active() {
-                crate::shadow::find_handle(address, len).unwrap_or_else(|| crate::shadow::find(address, len).map(ShadowHandle::Legacy)).unwrap()
-            } else {
-                crate::shadow::find(address, len).map(ShadowHandle::Legacy).unwrap()
-            }
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(ShadowHandle).unwrap()
-    };
+    let mut shadow: crate::shadow::ShadowHandle = crate::shadow::find_handle(address, len).unwrap();
     let unit = {
         // SAFETY: a buffer view's union member.
         let b = unsafe { desc.Anonymous.Buffer };
@@ -4130,16 +4069,7 @@ fn make_twinned(
     let device = &host.device;
     match view {
         &View::Constant(address, size) => {
-            let shadow: ShadowHandle = {
-                #[cfg(all(windows, feature = "native-memory"))]
-                if crate::memory_backend::is_native_backend_active() {
-                    crate::shadow::find_handle(address, u64::from(size)).map(ShadowHandle::Legacy)
-                } else {
-                    crate::shadow::find(address, u64::from(size)).map(ShadowHandle::Legacy)
-                }
-                #[cfg(not(all(windows, feature = "native-memory")))]
-                crate::shadow::find(address, u64::from(size)).map(ShadowHandle)
-            }?;
+            let shadow: ShadowHandle = crate::shadow::find_handle(address, u64::from(size))?;
             let gpu = shadow.gpu(address);
             if gpu % 256 != 0 {
                 once!(

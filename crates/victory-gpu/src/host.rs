@@ -446,16 +446,7 @@ fn sweep() {
     crate::book::check();
     let headroom = ram_headroom();
     crate::pool::room(host().and_then(|h| h.video_memory()), headroom, now);
-    #[cfg(all(windows, feature = "native-memory"))]
-    if !crate::memory_backend::is_native_backend_active() {
-        crate::shadow::trim_snapshots(headroom);
-        crate::shadow::let_go_idle(headroom);
-    }
-    #[cfg(not(all(windows, feature = "native-memory")))]
-    {
-        crate::shadow::trim_snapshots(headroom);
-        crate::shadow::let_go_idle(headroom);
-    }
+    // Native backend doesn't need trim_snapshots/let_go_idle
     send::trim_spare(headroom);
     crate::pipeline::trim_library();
     crate::texture::trim_read_scratch(headroom);
@@ -842,13 +833,10 @@ pub(crate) fn host() -> Option<&'static Host> {
     HOST.get_or_init(|| match create() {
         Ok(host) => {
             // Initialize memory backend after host is created
-            #[cfg(all(windows, feature = "native-memory"))]
-            {
-                let device = Arc::new(host.device.clone());
-                let copy_queue = host.copy_queue();
-                if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
-                    tracing::warn!(error = %e, "failed to initialize memory backend");
-                }
+            let device = Arc::new(host.device.clone());
+            let copy_queue = host.copy_queue();
+            if let Err(e) = crate::memory_backend::init_memory_backend_auto(Some(device), Some(copy_queue)) {
+                tracing::warn!(error = %e, "failed to initialize memory backend");
             }
             Some(host)
         }
@@ -4778,14 +4766,8 @@ impl Host {
     /// (`crate::picked`).
     fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
         use std::sync::Arc;
-        // Skip legacy card buffers when native backend is active
-        #[cfg(all(windows, feature = "native-memory"))]
-        if crate::memory_backend::is_native_backend_active() {
-            return None;
-        }
-        if !crate::shadow::cards() {
-            return None;
-        }
+        // Native backend doesn't use card buffers
+        return None;
         // The ranges this submission's shaders may write, per copy.
         let declared: Vec<Declared> = declared.iter().filter(|(shadow, _)| shadow.carded()).cloned().collect();
         let declared = if crate::picked::lands() { crate::picked::with(declared, &picked.written) } else { declared };
@@ -6130,13 +6112,8 @@ impl Host {
         stage.next("submit: gathering what to ask about");
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // Skip legacy shadow system when native backend is active
-        #[cfg(all(windows, feature = "native-memory"))]
-        if !crate::memory_backend::is_native_backend_active() {
-            // The ranges shaders write are counted for it (with the relay).
-            crate::shadow::preparing(this_submission);
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::preparing(this_submission);
+        // Native backend doesn't use shadow::preparing
+        // The ranges shaders write are counted for it (with the relay).
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         ahead.part(14);
@@ -6220,20 +6197,7 @@ impl Host {
         // The snapshots of the ranges shaders may write, if they were left
         // for now (`crate::shadow::wide_back`): the refreshes are done, the
         // lists have not gone to the card.
-        #[cfg(all(windows, feature = "native-memory"))]
-        if !crate::memory_backend::is_native_backend_active() {
-            {
-                #[cfg(feature = "diagnostics")]
-                let snapshots = std::time::Instant::now();
-                crate::shadow::take_snapshots();
-                #[cfg(feature = "diagnostics")]
-                crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
-            }
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        {
-            #[cfg(feature = "diagnostics")]
-            let snapshots = std::time::Instant::now();
+        // Native backend doesn't take snapshots
             crate::shadow::take_snapshots();
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
@@ -6252,14 +6216,8 @@ impl Host {
         }
         // What shaders may write through views they pick: last, so that no
         // refresh of this submission leaves it alone.
-        #[cfg(all(windows, feature = "native-memory"))]
-        let picked = if crate::memory_backend::is_native_backend_active() {
-            crate::picked::Ranges::default()
-        } else {
-            crate::picked::declare(runs)
-        };
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let picked = crate::picked::declare(runs);
+        // Native backend doesn't use picked ranges
+        let picked = crate::picked::Ranges::default();
         for (shadow, at, len) in &picked.written {
             shadow.writing(*at, *len);
         }
@@ -6493,14 +6451,7 @@ impl Host {
         // With the relay: nothing is in the air now, so no fetch still to
         // be merged is older than the sends to card copies so far, and
         // their notes can go.
-        #[cfg(all(windows, feature = "native-memory"))]
-        if relay() && !crate::memory_backend::is_native_backend_active() {
-            crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        if relay() {
-            crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
-        }
+        // Native backend doesn't use relay
         working(was_working);
         None
     }
@@ -9444,7 +9395,6 @@ impl Meter {
         crate::copystat::presented();
         self.frames += 1;
         // Advance memory backend frame counter
-        #[cfg(all(windows, feature = "native-memory"))]
         if let Some(backend) = crate::memory_backend::memory_backend() {
             backend.next_frame();
         }
@@ -9486,16 +9436,7 @@ impl Meter {
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
         );
-        #[cfg(all(windows, feature = "native-memory"))]
-        if !crate::memory_backend::is_native_backend_active() {
-            crate::shadow::exact_line(frames);
-            crate::shadow::back_line(frames);
-        }
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        {
-            crate::shadow::exact_line(frames);
-            crate::shadow::back_line(frames);
-        }
+        // Native backend doesn't use exact_line/back_line
         #[cfg(feature = "diagnostics")]
         crate::resource::scene_dimension_line();
         crate::descriptor::sync_line(frames);
@@ -9559,14 +9500,8 @@ impl Meter {
         // Depth planes drawn from their twins.
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
-        #[cfg(all(windows, feature = "native-memory"))]
-        let card = if crate::memory_backend::is_native_backend_active() {
-            [0u64; 10]
-        } else {
-            crate::shadow::card_stats()
-        };
-        #[cfg(not(all(windows, feature = "native-memory")))]
-        let card = crate::shadow::card_stats();
+        // Native backend doesn't use card stats
+        let card = [0u64; 10];
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
         // Over the same frames as the counts above.
