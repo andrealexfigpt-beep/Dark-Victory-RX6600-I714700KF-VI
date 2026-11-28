@@ -1162,7 +1162,7 @@ mod tests {
         let address = 0x6000_0000_0000u64;
         let one = crate::shadow::find_known(address, 64 << 10).expect("a host window");
         let two = crate::shadow::find_known(address, 64 << 10).expect("the same host window");
-        assert!(one.ptr_eq(&two));
+        assert!(std::sync::Arc::ptr_eq(&one, &two));
         assert!((64 << 10..=128 << 10).contains(&one.span().1));
     }
 
@@ -5158,12 +5158,12 @@ impl Host {
                         (0..r.span.pieces).map(move |p| {
                             let flagged = !r.compared || differs.get((r.at + p) as usize).is_none_or(|&d| torn::flagged(d));
                             let wanted = suspects.map_or(flagged, |s| s.wanted((r.shadow.id(), r.span.first + p), flagged));
-                            (r.shadow.as_ptr() as usize, r.span.first + p, wanted)
+                            (std::sync::Arc::as_ptr(&r.shadow) as usize, r.span.first + p, wanted)
                         })
                     });
                 let fetched = flagged_pieces(flags);
                 for r in plan.ranges.iter().filter(|r| !r.picked) {
-                    let copy = r.shadow.as_ptr() as usize;
+                    let copy = std::sync::Arc::as_ptr(&r.shadow) as usize;
                     if upcheck::on() {
                         upcheck::declared(r.shadow.id(), r.span.from as usize, r.span.to as usize);
                     }
@@ -5294,7 +5294,7 @@ impl Host {
                 let copies = check.as_ref().map_or(&pieces, |c| &c.copies);
                 // Coalesce consecutive commands only when both sides are contiguous.
                 for run in copies.chunk_by(|a, b| {
-                    .ptr_eq(&a.0, &b.0) && a.2 == b.1 && a.3 + (a.2 - a.1) as u64 == b.3
+                    std::sync::Arc::ptr_eq(&a.0, &b.0) && a.2 == b.1 && a.3 + (a.2 - a.1) as u64 == b.3
                 }) {
                     let (shadow, lo, _, at) = &run[0];
                     let hi = run[run.len() - 1].2;
@@ -5364,7 +5364,7 @@ impl Host {
                 }
                 let mut notes = land::Notes::default();
                 let mut merged = 0;
-                for run in pieces[jobs[j].clone()].chunk_by(|a, b| .ptr_eq(&a.0, &b.0)) {
+                for run in pieces[jobs[j].clone()].chunk_by(|a, b| std::sync::Arc::ptr_eq(&a.0, &b.0)) {
                     let addressed = run.iter().map(|(_, lo, hi, at)| (*lo, *hi, data + *at as usize));
                     // SAFETY: the fetch has finished and the mapping lives
                     // until all merge jobs return.
@@ -5442,7 +5442,7 @@ impl Host {
                 let mut back: Vec<Declared> = Vec::new();
                 for flight in &flights {
                     for (shadow, ranges) in flight.back.iter().filter(|(shadow, _)| !shadow.carded()) {
-                        match back.iter_mut().find(|(s, _)| .ptr_eq(s, shadow)) {
+                        match back.iter_mut().find(|(s, _)| s.ptr_eq(shadow)) {
                             Some((_, all)) => all.extend_from_slice(ranges),
                             None => back.push((shadow.clone(), ranges.clone())),
                         }
@@ -5583,7 +5583,7 @@ impl Host {
                     continue;
                 }
                 let (lo, hi) = r.shadow.card_piece(&r.span, p);
-                if lo < hi && seen.insert((r.shadow.as_ptr() as usize, lo, hi)) {
+                if lo < hi && seen.insert((std::sync::Arc::as_ptr(&r.shadow) as usize, lo, hi)) {
                     pieces.push((i, lo, hi, total));
                     total += (hi - lo) as u64;
                 }
@@ -5940,7 +5940,7 @@ impl Host {
                         self.card_back(card, submitted, &mut seen);
                     }
                     for (shadow, ranges) in &flight.back {
-                        match back.iter_mut().find(|(s, _)| .ptr_eq(s, shadow)) {
+                        match back.iter_mut().find(|(s, _)| s.ptr_eq(shadow)) {
                             Some((_, all)) => {
                                 for range in ranges {
                                     if !all.contains(range) {
@@ -6874,7 +6874,7 @@ impl HostList {
         let texture: &'static ID3D12Resource = unsafe { &*std::ptr::from_ref(&copy.texture) };
         let wanted = legal_for(copy.flags(), wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        match states.entry(copy.as_ptr() as usize) {
+        match states.entry(std::sync::Arc::as_ptr(&copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert((wanted, wanted, copy));
                 self.changed_something();
@@ -6898,7 +6898,7 @@ impl HostList {
         let wanted = legal_for(copy.flags(), wanted);
         self.changed_something();
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        let before = match states.entry(copy.as_ptr() as usize) {
+        let before = match states.entry(std::sync::Arc::as_ptr(&copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert((wanted, wanted, copy.clone()));
                 None
@@ -6951,7 +6951,7 @@ impl HostList {
         let side = usize::from(colour);
         let mut twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
         let u = twins
-            .entry(twin.as_ptr() as usize)
+            .entry(std::sync::Arc::as_ptr(&twin) as usize)
             .or_insert_with(|| TwinUse {
                 depth: depth.clone(),
                 twin: twin.clone(),
@@ -7162,7 +7162,7 @@ impl HostList {
                 (&twin.colour, depth)
             };
             for (texture, state) in [(from, COPY_SOURCE), (to, COPY_DEST)] {
-                let key = texture.as_ptr() as usize;
+                let key = texture.serial as usize;
                 let real = texture.state.load(Ordering::Relaxed);
                 copying.insert(key, state);
                 if real != state {
@@ -8391,7 +8391,7 @@ impl Batch {
 
     fn add(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>, address: usize, len: usize) {
         let end = address + len;
-        let key = shadow.as_ptr() as usize;
+        let key = std::sync::Arc::as_ptr(shadow) as usize;
         if self.ahead.get(&key).is_some_and(|&(from, to)| from <= address && end <= to) {
             return;
         }
@@ -8413,15 +8413,15 @@ impl Batch {
         // From here on it is refreshed around what the shaders write. (What
         // is in front of all the steps was, up to here.)
         if !self.front {
-            self.ahead.remove(&(shadow.as_ptr() as usize));
+            self.ahead.remove(&(std::sync::Arc::as_ptr(shadow) as usize));
         }
-        let Some(at) = self.index.remove(&(shadow.as_ptr() as usize)) else {
+        let Some(at) = self.index.remove(&(std::sync::Arc::as_ptr(shadow) as usize)) else {
             return;
         };
         let (shadow, from, to) = self.refreshes.swap_remove(at);
         // The last entry took its place.
         if let Some(moved) = self.refreshes.get(at) {
-            self.index.insert(moved.0.as_ptr() as usize, at);
+            self.index.insert(std::sync::Arc::as_ptr(&moved.0) as usize, at);
         }
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
@@ -8473,7 +8473,7 @@ impl Batch {
     /// Whether `staging` is still to be refreshed in this submission (and
     /// notes it refreshed).
     fn texture_due<T>(&mut self, staging: &std::sync::Arc<T>) -> bool {
-        self.textures.insert(staging.as_ptr() as *const () as usize)
+        self.textures.insert(std::sync::Arc::as_ptr(staging) as *const () as usize)
     }
 
     /// Before a step that writes title memory: pending refreshes are done
