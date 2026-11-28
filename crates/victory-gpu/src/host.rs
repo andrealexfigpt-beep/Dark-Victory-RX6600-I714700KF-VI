@@ -4037,7 +4037,10 @@ struct RelayBack {
 }
 
 fn relay_hand_back(back: &[Declared]) -> RelayBack {
+    #[cfg(not(all(windows, feature = "native-memory")))]
     let mut work: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> = Vec::new();
+    #[cfg(all(windows, feature = "native-memory"))]
+    let mut work: Vec<(crate::shadow::ShadowHandle, usize, usize)> = Vec::new();
     for (shadow, declared) in back {
         if shadow.carded() {
             continue;
@@ -4047,6 +4050,9 @@ fn relay_hand_back(back: &[Declared]) -> RelayBack {
         for &(from, to) in &spans {
             shadow.relay_compared(from, to - from);
         }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
+        #[cfg(all(windows, feature = "native-memory"))]
         work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
     }
     RelayBack { work, found: None }
@@ -4447,7 +4453,10 @@ fn hand_back(back: &[Declared]) {
     if crate::shadow::wide_back() {
         // Every range first (the pieces that differ, found on several
         // threads), then the merges, in order, as below.
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let mut work: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> = Vec::new();
+        #[cfg(all(windows, feature = "native-memory"))]
+        let mut work: Vec<(crate::shadow::ShadowHandle, usize, usize)> = Vec::new();
         for (shadow, declared) in back {
             if shadow.carded() {
                 continue;
@@ -4461,6 +4470,9 @@ fn hand_back(back: &[Declared]) {
                     _ => spans.push((from, to)),
                 }
             }
+            #[cfg(not(all(windows, feature = "native-memory")))]
+            work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
+            #[cfg(all(windows, feature = "native-memory"))]
             work.extend(spans.into_iter().map(|(from, to)| (shadow.clone(), from, to)));
         }
         #[cfg(feature = "diagnostics")]

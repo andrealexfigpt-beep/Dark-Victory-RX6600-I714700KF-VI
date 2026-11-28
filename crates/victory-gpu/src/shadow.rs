@@ -268,6 +268,54 @@ impl ShadowHandle {
             ShadowHandle::Native(_) => {}, // Native backend handles this differently
         }
     }
+
+    /// Whether this copy is carded (part of the card's memory).
+    pub fn carded(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.carded(),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Whether this copy is in-place (title memory in place).
+    pub fn in_place(&self) -> bool {
+        match self {
+            ShadowHandle::Legacy(s) => s.in_place(),
+            ShadowHandle::Native(_) => false,
+        }
+    }
+
+    /// Compare this copy's relay pages with another copy's.
+    pub fn relay_compared(&self, address: usize, len: usize) {
+        match self {
+            ShadowHandle::Legacy(s) => s.relay_compared(address, len),
+            ShadowHandle::Native(_) => {},
+        }
+    }
+
+    /// Copy back the given ranges from GPU to CPU.
+    pub fn copy_back_done(&self, ranges: &[(usize, usize)]) {
+        match self {
+            ShadowHandle::Legacy(s) => s.copy_back_done(ranges),
+            ShadowHandle::Native(_) => {},
+        }
+    }
+
+    /// Copy back a range from GPU to CPU, returning the number of bytes copied.
+    pub fn copy_back(&self, address: usize, len: usize) -> usize {
+        match self {
+            ShadowHandle::Legacy(s) => s.copy_back(address, len),
+            ShadowHandle::Native(_) => 0,
+        }
+    }
+
+    /// Copy back a range from GPU to CPU with additional found ranges, returning the number of bytes copied.
+    pub fn copy_back_with(&self, address: usize, len: usize, found: Option<Vec<(usize, usize)>>) -> usize {
+        match self {
+            ShadowHandle::Legacy(s) => s.copy_back_with(address, len, found),
+            ShadowHandle::Native(_) => 0,
+        }
+    }
 }
 
 /// Positive proofs that ranges of one host copy were unchanged. A proof is

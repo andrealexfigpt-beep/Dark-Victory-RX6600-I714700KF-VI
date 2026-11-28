@@ -5,6 +5,9 @@
 use std::sync::Arc;
 
 use super::*;
+#[cfg(all(windows, feature = "native-memory"))]
+use crate::shadow::ShadowHandle;
+#[cfg(not(all(windows, feature = "native-memory")))]
 use crate::shadow::Shadow;
 
 /// The stage (`VICTORY_CARD_STEPS`; off by default): `1` constant buffers
@@ -562,6 +565,16 @@ struct Op {
     to: To,
 }
 
+#[cfg(all(windows, feature = "native-memory"))]
+enum To {
+    /// A host copy, and the title address.
+    Copy(ShadowHandle, usize),
+    /// A descriptor slot (title heap, slot).
+    Slot(usize, u32),
+    /// A buffer's beginning.
+    Buffer(ID3D12Resource),
+}
+#[cfg(not(all(windows, feature = "native-memory")))]
 enum To {
     /// A host copy, and the title address.
     Copy(Arc<Shadow>, usize),
@@ -789,7 +802,7 @@ impl Host {
             let to = match does[i] {
                 Does::Copy { .. } => {
                     let to = holder(&writers, dst, dst + len)?;
-                    if elsewhere(&does, Arc::as_ptr(&to) as usize, dst, dst + len) {
+                    if elsewhere(&does, to.as_ptr(), dst, dst + len) {
                         return Err("another host copy of what it writes is read");
                     }
                     if !mapped(dst, dst + len, &mut room) {
@@ -828,17 +841,31 @@ impl Host {
         // the title's. (One step for each host copy, over all that is read of
         // it: a flush brings a copy up to date from the first range asked for
         // to the last, whatever the steps.)
+        #[cfg(not(all(windows, feature = "native-memory")))]
         let mut spans: ByCopy<(Arc<Shadow>, usize, usize)> = ByCopy::default();
+        #[cfg(all(windows, feature = "native-memory"))]
+        let mut spans: ByCopy<(ShadowHandle, usize, usize)> = ByCopy::default();
         for op in &ops {
             let to = match &op.to {
                 To::Copy(to, dst) => Some((to, *dst)),
                 _ => None,
             };
+            #[cfg(not(all(windows, feature = "native-memory")))]
             for (shadow, at) in std::iter::once((&op.from.0, op.from.1)).chain(to) {
                 let span = spans.entry(Arc::as_ptr(shadow) as usize).or_insert_with(|| (shadow.clone(), at, at + op.len));
                 (span.1, span.2) = (span.1.min(at), span.2.max(at + op.len));
             }
+            #[cfg(all(windows, feature = "native-memory"))]
+            for (shadow, at) in std::iter::once((&op.from.0, op.from.1)).chain(to) {
+                let span = spans.entry(shadow.as_ptr()).or_insert_with(|| (shadow.clone(), at, at + op.len));
+                (span.1, span.2) = (span.1.min(at), span.2.max(at + op.len));
+            }
         }
+        #[cfg(not(all(windows, feature = "native-memory")))]
+        for (shadow, from, to) in spans.into_values() {
+            shadow.refresh(&own.list, from as u64, (to - from) as u64);
+        }
+        #[cfg(all(windows, feature = "native-memory"))]
         for (shadow, from, to) in spans.into_values() {
             shadow.refresh(&own.list, from as u64, (to - from) as u64);
         }
