@@ -3745,7 +3745,7 @@ fn buffer_srv(
             }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
+        crate::shadow::find(address, len).map(ShadowHandle)
     }?;
     let mut offset = shadow.offset_in(address).unwrap_or(0);
     let unit = element_size(&desc);
@@ -3863,7 +3863,7 @@ fn buffer_uav(
             }
         }
         #[cfg(not(all(windows, feature = "native-memory")))]
-        crate::shadow::find(address, len).map(ShadowHandle::Legacy)
+        crate::shadow::find(address, len).map(ShadowHandle)
     }?;
     let unit = {
         // SAFETY: a buffer view's union member.

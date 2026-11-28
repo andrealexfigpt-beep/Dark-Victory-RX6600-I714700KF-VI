@@ -184,56 +184,6 @@ impl ShadowHandle {
             ShadowHandle::Native(s) => s.width(),
         }
     }
-}
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-pub struct ShadowHandle(Arc<Shadow>);
-
-#[cfg(all(windows, not(feature = "native-memory")))]
-impl ShadowHandle {
-    pub fn gpu(&self, address: u64) -> u64 {
-        self.0.gpu(address)
-    }
-
-    pub fn span(&self) -> (u64, u64) {
-        self.0.span()
-    }
-
-    pub fn offset_in(&self, address: u64) -> Option<u64> {
-        self.0.offset_in(address)
-    }
-
-    pub fn left(&self, address: u64) -> u64 {
-        self.0.left(address)
-    }
-
-    pub fn refresh(&self, list: &HostList, address: u64, len: u64) {
-        self.0.refresh(list, address, len)
-    }
-
-    pub fn gpu_writes(&self, list: &HostList, address: u64, len: u64) {
-        self.0.gpu_writes(list, address, len)
-    }
-
-    pub fn unwatched(&self) -> bool {
-        self.0.unwatched()
-    }
-
-    /// Get the underlying D3D12 resource for descriptor creation.
-    pub fn resource(&self) -> &ID3D12Resource {
-        &self.0.buffer
-    }
-
-    /// Offset of a title address from the buffer's start (legacy only, for view_home).
-    pub fn offset(&self, address: u64) -> u64 {
-        self.0.offset(address)
-    }
-
-    /// The bytes of the host buffer (resource width).
-    pub fn width(&self) -> u64 {
-        self.0.width()
-    }
-}
 
 /// Positive proofs that ranges of one host copy were unchanged. A proof is
 /// reused only under the same write-watch/guard epoch and GPU-pending epoch;
